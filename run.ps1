@@ -9,6 +9,8 @@
     'Web': Runs the Vite web preview server and launches your default browser.
 .PARAMETER Release
     Compiles with full optimizations (--release).
+.PARAMETER Installer
+    Compiles and packages the complete Windows NSIS installer and uninstaller suite.
 .PARAMETER SkipBuild
     Skips the build step and launches the existing compiled binary directly.
 .PARAMETER Port
@@ -33,6 +35,7 @@ param(
     [string]$Mode = 'Desktop',
 
     [switch]$Release,
+    [switch]$Installer,
     [switch]$SkipBuild,
     [int]$Port = 1420,
     [switch]$Help
@@ -80,6 +83,20 @@ if (-not (Test-Path "$ProjectRoot\node_modules")) {
 }
 
 # 2. Build Pipeline
+if ($Installer) {
+    Write-Host "[2/3] Compiling and packaging MakeMake Windows NSIS Installer..." -ForegroundColor Cyan
+    npm run build
+    npx tauri build
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Tauri installer packaging failed with exit code $LASTEXITCODE."
+        exit $LASTEXITCODE
+    }
+    Write-Host ""
+    Write-Host "[OK] MAKEMAKE INSTALLER PACKAGING COMPLETE!" -ForegroundColor Green
+    Write-Host "Installer location: $ProjectRoot\src-tauri\target\release\bundle\nsis\" -ForegroundColor Cyan
+    exit 0
+}
+
 if (-not $SkipBuild) {
     Write-Host "[2/3] Building frontend assets (Vite + TypeScript)..." -ForegroundColor Cyan
     npm run build

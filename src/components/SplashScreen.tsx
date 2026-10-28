@@ -167,7 +167,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-obsidian-950 overflow-hidden select-none">
-      {/* Background Video Player (if public/splash-moai.mp4 exists) */}
+      {/* Background Video Player (longer 10s video priority) */}
       {!videoError && (
         <video
           autoPlay
@@ -177,6 +177,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
           className="absolute inset-0 w-full h-full object-cover opacity-60 z-0"
           onError={() => setVideoError(true)}
         >
+          <source src="/splash-moai-longer.mp4" type="video/mp4" />
           <source src="/splash-moai.mp4" type="video/mp4" />
         </video>
       )}

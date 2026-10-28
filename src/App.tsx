@@ -21,6 +21,7 @@ export const App: React.FC = () => {
   const [viewMode, setViewMode] = useState<'cards' | 'table'>('cards');
   const [isDrawerOpen, setIsDrawerOpen] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [bgVideoEnabled, setBgVideoEnabled] = useState(true);
 
   const [settings, setSettings] = useState<ClientSettings>({
     defaultDownloadDir: 'C:/MakeMake/Downloads',
@@ -284,6 +285,23 @@ export const App: React.FC = () => {
         />
       )}
 
+      {/* Subtle Ambient Cyber-Moai Looping Canvas Backdrop */}
+      {bgVideoEnabled && (
+        <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
+          <video
+            autoPlay
+            loop
+            muted
+            playsInline
+            className="w-full h-full object-cover opacity-15"
+          >
+            <source src="/splash-moai-longer.mp4" type="video/mp4" />
+          </video>
+          <div className="absolute inset-0 bg-gradient-to-t from-obsidian-950 via-obsidian-950/70 to-obsidian-950/90" />
+          <div className="absolute inset-0 scanlines opacity-30" />
+        </div>
+      )}
+
       {/* Top Cyber HUD Header */}
       <Header
         stats={stats}
@@ -352,6 +370,11 @@ export const App: React.FC = () => {
         stats={stats}
         soundEnabled={soundEnabled}
         onToggleSound={handleToggleSound}
+        bgVideoEnabled={bgVideoEnabled}
+        onToggleBgVideo={() => {
+          cyberAudio.playClick();
+          setBgVideoEnabled((prev) => !prev);
+        }}
         isDrawerOpen={isDrawerOpen}
         onToggleDrawer={() => {
           cyberAudio.playClick();

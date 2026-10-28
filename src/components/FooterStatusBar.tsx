@@ -10,6 +10,7 @@ import {
   PanelBottomClose,
   LayoutGrid,
   List,
+  Film,
 } from 'lucide-react';
 import { SystemStats } from '../types/torrent';
 
@@ -17,6 +18,8 @@ interface FooterStatusBarProps {
   stats: SystemStats;
   soundEnabled: boolean;
   onToggleSound: () => void;
+  bgVideoEnabled: boolean;
+  onToggleBgVideo: () => void;
   isDrawerOpen: boolean;
   onToggleDrawer: () => void;
   viewMode: 'cards' | 'table';
@@ -28,6 +31,8 @@ export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
   stats,
   soundEnabled,
   onToggleSound,
+  bgVideoEnabled,
+  onToggleBgVideo,
   isDrawerOpen,
   onToggleDrawer,
   viewMode,
@@ -99,6 +104,20 @@ export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
           title={soundEnabled ? 'Mute Cyber Audio Haptics' : 'Enable Cyber Audio Haptics'}
         >
           {soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-cyber-cyan" /> : <VolumeX className="w-3.5 h-3.5 text-slate-500" />}
+        </button>
+
+        {/* Ambient Canvas Video Background Toggle */}
+        <button
+          onClick={onToggleBgVideo}
+          className={`flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+            bgVideoEnabled
+              ? 'text-cyber-cyan bg-obsidian-900 border border-cyber-cyan/40 shadow-glow-cyan'
+              : 'text-slate-500 bg-obsidian-900/50 border border-slate-800'
+          }`}
+          title={bgVideoEnabled ? 'Disable Ambient Moai Canvas Video' : 'Enable Ambient Moai Canvas Video'}
+        >
+          <Film className="w-3 h-3" />
+          <span className="hidden md:inline font-cyber text-[9px]">{bgVideoEnabled ? 'VIDEO: ON' : 'VIDEO: OFF'}</span>
         </button>
 
         {/* Global Limits Indicator */}

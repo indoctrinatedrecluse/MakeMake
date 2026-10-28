@@ -27,15 +27,21 @@ pub fn run() {
             commands::get_system_stats,
         ])
         .setup(|app| {
-            #[cfg(debug_assertions)]
-            {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Debug)
-                        .build(),
-                )?;
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.open_devtools();
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Debug)
+                    .build(),
+            )?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+
+                #[cfg(debug_assertions)]
+                {
+                    if std::env::var("MAKEMAKE_DEVTOOLS").is_ok() {
+                        let _ = window.open_devtools();
+                    }
                 }
             }
             Ok(())

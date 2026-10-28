@@ -120,9 +120,35 @@ MakeMake includes an autonomous PowerShell launcher ([`run.ps1`](file:///d:/Proj
 # 4. Instant Launch: Skip the build step and run the existing binary immediately
 .\run.ps1 -SkipBuild
 
-# 5. Help & Parameters:
+# 5. Windows NSIS Installer Package: Compile & package installer (.exe) with embedded uninstaller
+.\run.ps1 -Installer
+
+# 6. Help & Parameters:
 .\run.ps1 -Help
 ```
+
+---
+
+## 🗑️ Clean Uninstallation & Environment Sanitizer
+
+MakeMake is engineered with strict uninstallation cleanliness:
+1. **Direct `uninstall.exe` Execution**: When the native Windows NSIS uninstaller (`uninstall.exe`) is executed (either from Windows Settings or clicked directly in `%LOCALAPPDATA%\Programs\makemake`), custom NSIS lifecycle hooks (`NSIS_HOOK_PREUNINSTALL` and `NSIS_HOOK_POSTUNINSTALL`) execute to terminate any active swarm processes and **cleanly wipe all application data, WebView2 shader caches, logs, and state** from `%LOCALAPPDATA%\org.makemake.app` and registry keys.
+2. **One-Click Script Sanitizer (`uninstall.ps1`)**:
+```powershell
+# Instant clean uninstallation & cache wipe
+.\uninstall.ps1
+
+# Complete purge including target/ and dist/ build caches
+.\uninstall.ps1 -PurgeBuildArtifacts
+```
+
+---
+
+## 🎬 Dual Video Engine Allocation
+
+The project incorporates two generated video loops:
+* **`public/splash-moai-longer.mp4` (~10s)**: Main animated video for the **Splash Screen** and ambient **App Canvas Looping Background** (with real-time toggle `[VIDEO: ON/OFF]` in the footer bar).
+* **`public/splash-moai.mp4` (shorter loop)**: Dedicated visual loop for the **Windows NSIS Installer / Uninstaller**.
 
 ### Manual Development Commands
 ```bash
