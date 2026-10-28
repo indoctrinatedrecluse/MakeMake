@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <radialGradient id="bgGlow" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#0f1926" />
+      <stop offset="60%" stop-color="#06090e" />
+      <stop offset="100%" stop-color="#020406" />
+    </radialGradient>
+
+    <!-- Obsidian Stone Gradient -->
+    <linearGradient id="obsidian" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2a3342" />
+      <stop offset="45%" stop-color="#141a24" />
+      <stop offset="100%" stop-color="#0a0d13" />
+    </linearGradient>
+
+    <!-- Neon Cyan Circuitry -->
+    <linearGradient id="cyberCyan" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#55ffff" />
+      <stop offset="100%" stop-color="#00c8ff" />
+    </linearGradient>
+
+    <!-- Pukao Vermilion Scoria -->
+    <linearGradient id="pukaoRed" x1="0%" y1="0%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#ff4466" />
+      <stop offset="50%" stop-color="#ff1744" />
+      <stop offset="100%" stop-color="#990022" />
+    </linearGradient>
+
+    <!-- Gold Rune Glow -->
+    <linearGradient id="runeGold" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffe066" />
+      <stop offset="100%" stop-color="#ff9900" />
+    </linearGradient>
+
+    <filter id="neonGlowCyan" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="neonGlowRed" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Circular Outer Tech Ring -->
+  <circle cx="256" cy="256" r="250" fill="url(#bgGlow)" stroke="#1a2536" stroke-width="4" />
+  <circle cx="256" cy="256" r="236" fill="none" stroke="#00f0ff" stroke-width="1.5" stroke-dasharray="14 8 4 8" opacity="0.4" />
+  <circle cx="256" cy="256" r="222" fill="none" stroke="#ff2a6d" stroke-width="1" stroke-dasharray="6 20 40 10" opacity="0.3" />
+
+  <!-- Wayfinding Nav Arc Points -->
+  <g opacity="0.7">
+    <line x1="256" y1="12" x2="256" y2="30" stroke="#00f0ff" stroke-width="2" />
+    <line x1="256" y1="482" x2="256" y2="500" stroke="#00f0ff" stroke-width="2" />
+    <line x1="12" y1="256" x2="30" y2="256" stroke="#00f0ff" stroke-width="2" />
+    <line x1="482" y1="256" x2="500" stroke="#00f0ff" stroke-width="2" />
+  </g>
+
+  <!-- Tangata-Manu Petroglyph Wings (Background Cybernetic Wings) -->
+  <path d="M 60,340 C 90,260 160,220 220,240 C 180,270 120,320 80,420 Z" fill="#111824" stroke="#00f0ff" stroke-width="1.5" opacity="0.5" />
+  <path d="M 452,340 C 422,260 352,220 292,240 C 332,270 392,320 432,420 Z" fill="#111824" stroke="#00f0ff" stroke-width="1.5" opacity="0.5" />
+
+  <!-- PUKAO (Red Scoria Cyber Cylinder / Topknot on Head) -->
+  <g filter="url(#neonGlowRed)">
+    <polygon points="186,88 326,88 338,130 174,130" fill="url(#pukaoRed)" stroke="#ff7799" stroke-width="2" />
+    <ellipse cx="256" cy="88" rx="70" ry="14" fill="#ff4466" />
+    <!-- Cyber Core Slot in Pukao -->
+    <rect x="236" y="98" width="40" height="20" rx="3" fill="#110006" stroke="#ff2a6d" stroke-width="1.5" />
+    <line x1="244" y1="108" x2="268" y2="108" stroke="#ffffff" stroke-width="2" />
+  </g>
+
+  <!-- MOAI HEAD MONOLITH MAIN BODY -->
+  <!-- Left temple, strong brow, elongated nose, prominent chin, squared jaw -->
+  <polygon points="
+    184,132 328,132 
+    334,168 316,210 
+    322,300 306,370 
+    312,410 286,436 
+    226,436 200,410 
+    206,370 190,300 
+    196,210 178,168
+  " fill="url(#obsidian)" stroke="#38495f" stroke-width="3" />
+
+  <!-- Moai Brow Structure (Severe geometric ridge) -->
+  <polygon points="196,206 316,206 308,232 204,232" fill="#1d2634" stroke="#00f0ff" stroke-width="1" />
+
+  <!-- Deep Set Eye Sockets & Glowing Cyan Optics -->
+  <g filter="url(#neonGlowCyan)">
+    <!-- Left Eye Socket -->
+    <polygon points="208,236 244,238 240,256 212,254" fill="#080c12" stroke="#00f0ff" stroke-width="1.5" />
+    <rect x="218" y="244" width="16" height="4" rx="2" fill="#55ffff" />
+    <!-- Right Eye Socket -->
+    <polygon points="268,238 304,236 300,254 272,256" fill="#080c12" stroke="#00f0ff" stroke-width="1.5" />
+    <rect x="278" y="244" width="16" height="4" rx="2" fill="#55ffff" />
+  </g>
+
+  <!-- Long High-Bridge Moai Nose with Chiseled Cyber Line -->
+  <polygon points="244,228 268,228 274,330 256,346 238,330" fill="#243142" stroke="#475c75" stroke-width="1.5" />
+  <line x1="256" y1="230" x2="256" y2="340" stroke="#00f0ff" stroke-width="1" opacity="0.6" />
+
+  <!-- High Geometric Nostril Flares -->
+  <polygon points="238,330 256,346 230,344" fill="#141b25" />
+  <polygon points="274,330 256,346 282,344" fill="#141b25" />
+
+  <!-- Pouting Long Upper Lip and Stern Thin Lower Chin Profile -->
+  <polygon points="232,364 280,364 274,374 238,374" fill="#101722" stroke="#2e3d4f" stroke-width="1" />
+  <line x1="236" y1="368" x2="276" y2="368" stroke="#ff2a6d" stroke-width="1" opacity="0.8" />
+
+  <!-- Massive Square Jawline -->
+  <polygon points="214,394 298,394 284,424 228,424" fill="#18212e" stroke="#00f0ff" stroke-width="1" opacity="0.7" />
+
+  <!-- CYBERNETIC CIRCUITRY / RONGORONGO VEINS ON CHEEKS -->
+  <g filter="url(#neonGlowCyan)" opacity="0.9">
+    <!-- Left cheek circuitry -->
+    <path d="M 204,280 L 226,294 L 226,334 L 216,344" fill="none" stroke="#00f0ff" stroke-width="2" />
+    <circle cx="216" cy="344" r="3" fill="#00f0ff" />
+    <!-- Right cheek circuitry -->
+    <path d="M 308,280 L 286,294 L 286,334 L 296,344" fill="none" stroke="#00f0ff" stroke-width="2" />
+    <circle cx="296" cy="344" r="3" fill="#00f0ff" />
+  </g>
+
+  <!-- RONGORONGO GLYPH PEDESTAL / COLLAR AT BASE -->
+  <g filter="url(#neonGlowCyan)">
+    <rect x="160" y="444" width="192" height="24" rx="4" fill="#0b1017" stroke="#00f0ff" stroke-width="1.5" />
+    <!-- Cyber Boustrophedon Glyph Markings on Collar -->
+    <path d="M 178,456 L 186,450 L 194,456 L 186,462 Z" fill="#00f0ff" opacity="0.8" />
+    <circle cx="212" cy="456" r="4" fill="none" stroke="#ffd000" stroke-width="1.5" />
+    <path d="M 230,452 L 246,452 M 238,452 L 238,460 M 234,460 L 242,460" stroke="#00f0ff" stroke-width="1.5" />
+    <path d="M 266,452 L 282,460 M 266,460 L 282,452" stroke="#ff2a6d" stroke-width="1.5" />
+    <circle cx="300" cy="456" r="4" fill="none" stroke="#ffd000" stroke-width="1.5" />
+    <path d="M 318,456 L 326,450 L 334,456 L 326,462 Z" fill="#00f0ff" opacity="0.8" />
+  </g>
+
+  <!-- MAKEMAKE BIRDMAN SYMBOL EMITTER (Top Center of Brow) -->
+  <circle cx="256" cy="184" r="10" fill="#0a1017" stroke="#ffd000" stroke-width="2" />
+  <circle cx="256" cy="184" r="4" fill="#ffea75" />
+</svg>
