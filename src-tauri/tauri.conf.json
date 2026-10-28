@@ -41,7 +41,10 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "installerHooks": "nsis_hooks.nsh"
+        "installerHooks": "nsis_hooks.nsh",
+        "headerImage": "installer/installer-header.bmp",
+        "sidebarImage": "installer/installer-sidebar.bmp",
+        "uninstallerHeaderImage": "installer/uninstaller-header.bmp"
       }
     }
   }

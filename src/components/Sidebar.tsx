@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { SwarmAstrolabe } from './gizmos/SwarmAstrolabe';
 import { RongorongoConsole } from './gizmos/RongorongoConsole';
+import { SystemStats, TorrentItem } from '../types/torrent';
 
 export type TorrentFilter = 'all' | 'active' | 'completed' | 'paused' | 'backedUp';
 
@@ -23,6 +24,9 @@ interface SidebarProps {
     backedUp: number;
   };
   selectedTorrentName?: string;
+  activePeers?: number;
+  torrents?: TorrentItem[];
+  stats?: SystemStats;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -30,6 +34,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectFilter,
   counts,
   selectedTorrentName,
+  activePeers = 0,
+  torrents = [],
+  stats,
 }) => {
   const navItems = [
     { id: 'all' as TorrentFilter, label: 'All Monoliths', icon: Layers, count: counts.all, color: 'text-cyber-cyan' },
@@ -82,18 +89,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* Swarm Astrolabe Radar Gizmo */}
         <div>
-          <SwarmAstrolabe activeTorrentName={selectedTorrentName} />
+          <SwarmAstrolabe activeTorrentName={selectedTorrentName} activePeers={activePeers} />
         </div>
       </div>
 
-      {/* Bottom Rongorongo Console */}
+      {/* Bottom Rongorongo Event Console */}
       <div className="mt-4 pt-3 border-t border-slate-800/80">
-        <RongorongoConsole />
+        <RongorongoConsole
+          torrents={torrents}
+          stats={
+            stats ?? {
+              globalDownloadSpeed: 0,
+              globalUploadSpeed: 0,
+              totalActivePeers: activePeers,
+              dhtNodes: 0,
+              totalTorrents: torrents.length,
+              activeTorrents: 0,
+              totalDownloadedAllTime: 0,
+            }
+          }
+        />
         <div className="mt-2 px-1 text-[9px] font-mono text-slate-500 flex items-center justify-between">
           <span>MOTU NUI / 27°07′S</span>
           <span className="flex items-center gap-1 text-cyber-cyan">
             <Compass className="w-3 h-3" />
-            <span>WAYFINDING: LOCKED</span>
+            <span>PEERS: {activePeers}</span>
           </span>
         </div>
       </div>

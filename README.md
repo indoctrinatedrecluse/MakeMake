@@ -34,7 +34,12 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
   * Every `.torrent` or magnet link immediately opens a cyber-styled Inspection Modal.
   * For magnet links, initiates DHT metadata resolution with animated Rongorongo glyph decoders.
   * Displays complete file tree hierarchy with individual file size, piece counts, and selection checkboxes.
-  * Configurable download destination pre-filled with the global default path.
+* **Destination prompt on every add**:
+  * The native folder picker opens as soon as a `.torrent` file is parsed, and right after the
+    swarm returns metadata for a magnet link.
+  * The global default download location can be **left empty/unset** ("Clear" in Settings) — then
+    MakeMake always asks, and falls back to the OS Downloads folder if the picker is cancelled.
+  * Files are written exactly where you choose; every torrent keeps its own output folder.
 
 ### 2. Temporal Auto-Backup Engine
 * **Automatic `.torrent` Archival**:
@@ -47,15 +52,17 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
 
 ### 3. Sacred Context HUD (Right-Click Context Menu)
 * Comprehensive operational menu for each data monolith:
-  * ⚡ **Awaken (Resume/Start)**: Re-engage swarm peer connections.
-  * ⏸ **Dormant (Pause/Stop)**: Choke peers and park IO tasks.
+  * ⚡ **Awaken (Resume/Start)** / ⏸ **Dormant (Pause)**: Start or choke the swarm connection.
   * 🔄 **Verify Obsidian Integrity (Force Recheck)**: Recalculate piece hashes against the local disk payload.
-  * 📂 **Open Sacred Chamber (Open Folder)**: Open file explorer directly to the download directory.
-  * 📋 **Copy Magnet Link / Copy InfoHash**: One-click clipboard copy.
-  * ⏱ **Set Bandwidth Allocation**: High / Normal / Low allocation throttling.
-  * 💾 **Backup .torrent Now**: Manual immediate snapshot to the archive folder.
-  * 🗑 **Remove from Swarm (Deregister)**: Safely unloads the torrent from the client.
-  * 💥 **Purge Monolith & Files (Delete Payload)**: Irreversible disk eradication with high-voltage warning modal.
+  * 📂 **Open Sacred Chamber**: Open the download directory. 🔍 **Reveal Payload** selects it in Explorer.
+  * 📄 **Open Downloaded File** for single-file torrents.
+  * 🗂 **Select Payload Files…**: Jump to the drawer's Files tab to change the file selection live.
+  * 📋 **Copy Info Hash / Magnet Link / Download Path**.
+  * ⏱ **Swarm Priority** submenu: High / Normal / Low (persisted).
+  * 💾 **Backup .torrent Now** and **Save .torrent As…** (native save dialog).
+  * 🗑 **Remove from Swarm (Deregister)** — keeps the data on disk.
+  * 💥 **Purge Monolith & Files** — irreversible, behind the hazard modal.
+* Header actions: **Pause all / Resume all**. Status bar: **turtle throttle** toggle.
 
 ### 4. Safety Gates & Irreversible Action Modals
 * Removal and deletion actions are protected by a cyberpunk hazard dialogue detailing exact file paths and sizes to prevent accidental data loss.
@@ -108,7 +115,7 @@ Use this exact prompt in **Google Veo / Imagen 3 Video / VideoFX** to generate t
 MakeMake includes an autonomous PowerShell launcher ([`run.ps1`](file:///d:/Projects/MakeMake/run.ps1)) that builds and launches the application as an **independent detached background process**, allowing you to close your terminal session at any time without terminating the app.
 
 ```powershell
-# 1. Default: Build frontend + native desktop binary and launch detached in background
+# 1. Default: Build frontend + native desktop binary and launch detached (no console window)
 .\run.ps1
 
 # 2. Release Mode: Build fully optimized release binary and launch detached
@@ -123,9 +130,15 @@ MakeMake includes an autonomous PowerShell launcher ([`run.ps1`](file:///d:/Proj
 # 5. Windows NSIS Installer Package: Compile & package installer (.exe) with embedded uninstaller
 .\run.ps1 -Installer
 
-# 6. Help & Parameters:
+# 6. Attach a debug console (GUI subsystem is otherwise always used, so no window appears)
+.\run.ps1 -Console
+
+# 7. Help & Parameters:
 .\run.ps1 -Help
 ```
+
+Prefer zero windows at all? Double-click **`MakeMake.vbs`** — it launches the compiled binary (or
+builds once, fully hidden) without any PowerShell or console window.
 
 ---
 
@@ -148,7 +161,12 @@ MakeMake is engineered with strict uninstallation cleanliness:
 
 The project incorporates two generated video loops:
 * **`public/splash-moai-longer.mp4` (~10s)**: Main animated video for the **Splash Screen** and ambient **App Canvas Looping Background** (with real-time toggle `[VIDEO: ON/OFF]` in the footer bar).
-* **`public/splash-moai.mp4` (shorter loop)**: Dedicated visual loop for the **Windows NSIS Installer / Uninstaller**.
+* **`public/splash-moai.mp4` (shorter loop)**: Used for the **torrent ingestion modal** canvas, and sampled into the **NSIS installer / uninstaller** artwork (`src-tauri/installer/installer-sidebar.bmp`, `installer-header.bmp`, `uninstaller-header.bmp`). NSIS can only render bitmaps, so the clip is sampled at a few timestamps:
+
+```bash
+# Requires Python + opencv-python (pip install opencv-python)
+python scripts/generate-installer-art.py
+```
 
 ### Manual Development Commands
 ```bash

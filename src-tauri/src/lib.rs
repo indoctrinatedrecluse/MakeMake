@@ -25,8 +25,18 @@ pub fn run() {
             commands::parse_torrent_file,
             commands::open_folder,
             commands::get_system_stats,
+            commands::pause_all,
+            commands::resume_all,
+            commands::set_priority,
+            commands::set_file_selection,
+            commands::get_torrent_peers,
+            commands::export_torrent,
+            commands::set_turtle_mode,
+            commands::open_path,
+            commands::reveal_path,
         ])
         .setup(|app| {
+            app.handle().plugin(tauri_plugin_dialog::init())?;
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Debug)

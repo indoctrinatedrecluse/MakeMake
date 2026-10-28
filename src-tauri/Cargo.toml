@@ -5,6 +5,11 @@ description = "MakeMake // Rapa Nui Cyberpunk BitTorrent Engine"
 authors = ["Recluse"]
 edition = "2021"
 
+[features]
+# `console` opts out of the GUI subsystem so a debug console is attached (dev only).
+default = []
+console = []
+
 [lib]
 name = "makemake_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -15,12 +20,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_bencode = "0.2.4"
-sha1 = "0.10"
 tokio = { version = "1", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6.0"
-url = "2.5"
 log = "0.4"
+
+# Real BitTorrent engine (DHT, trackers, peer wire protocol, piece verification).
+librqbit = "9.0.1"
+base64 = "0.22"

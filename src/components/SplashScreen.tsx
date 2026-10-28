@@ -269,9 +269,9 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
       {/* Bottom Action Footer */}
       <div className="relative z-10 w-full max-w-4xl mx-auto pb-8 px-6 flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="text-[11px] font-mono text-slate-400 text-center md:text-left">
-          <span>Drop custom video as </span>
-          <code className="text-cyber-gold bg-slate-900 px-1 py-0.5 rounded">public/splash-moai.mp4</code>
-          <span> for 4K live video backdrop</span>
+          <span className="text-cyber-gold font-bold">SPACE</span> play/pause ·{' '}
+          <span className="text-cyber-gold font-bold">I</span> inspector ·{' '}
+          <span className="text-cyber-gold font-bold">CTRL+V</span> paste magnet
         </div>
 
         <button

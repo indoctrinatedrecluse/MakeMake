@@ -11,8 +11,9 @@ import {
   LayoutGrid,
   List,
   Film,
+  Turtle,
 } from 'lucide-react';
-import { SystemStats } from '../types/torrent';
+import { ClientSettings, SystemStats } from '../types/torrent';
 
 interface FooterStatusBarProps {
   stats: SystemStats;
@@ -25,6 +26,8 @@ interface FooterStatusBarProps {
   viewMode: 'cards' | 'table';
   onChangeViewMode: (mode: 'cards' | 'table') => void;
   backupIntervalHours: number;
+  settings: ClientSettings;
+  onToggleTurtle: () => void;
 }
 
 export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
@@ -38,6 +41,8 @@ export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
   viewMode,
   onChangeViewMode,
   backupIntervalHours,
+  settings,
+  onToggleTurtle,
 }) => {
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 B';
@@ -49,6 +54,13 @@ export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
 
   const backupLabel =
     backupIntervalHours === 0 ? 'INSTANT' : `${backupIntervalHours}H INTERVAL`;
+
+  const formatLimit = (bytesPerSec: number) =>
+    bytesPerSec > 0 ? `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s` : '∞';
+
+  const [limitDown, limitUp] = settings.turtleModeEnabled
+    ? [settings.turtleDownloadSpeed, settings.turtleUploadSpeed]
+    : [settings.maxDownloadSpeed, settings.maxUploadSpeed];
 
   return (
     <footer className="h-8 px-4 border-t border-slate-800 bg-obsidian-950 flex items-center justify-between text-[11px] font-mono text-slate-400 select-none z-30">
@@ -120,11 +132,28 @@ export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
           <span className="hidden md:inline font-cyber text-[9px]">{bgVideoEnabled ? 'VIDEO: ON' : 'VIDEO: OFF'}</span>
         </button>
 
-        {/* Global Limits Indicator */}
-        <div className="flex items-center space-x-1 text-[10px] text-slate-500">
-          <Sliders className="w-3 h-3" />
-          <span>THROTTLE: [∞ / ∞]</span>
-        </div>
+        {/* Global Limits Indicator + Turtle Throttle Toggle */}
+        <button
+          onClick={onToggleTurtle}
+          className={`flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] border transition-colors ${
+            settings.turtleModeEnabled
+              ? 'text-cyber-amber border-cyber-amber/50 bg-cyber-amber/10'
+              : 'text-slate-500 border-slate-800 bg-obsidian-900/50 hover:text-cyber-cyan'
+          }`}
+          title={
+            settings.turtleModeEnabled
+              ? 'Turtle throttle active — click for full speed'
+              : 'Engage turtle throttle (alternate bandwidth limits)'
+          }
+        >
+          <Turtle className="w-3 h-3" />
+          <span className="flex items-center space-x-1">
+            <Sliders className="w-3 h-3" />
+            <span>
+              {formatLimit(limitDown)} / {formatLimit(limitUp)}
+            </span>
+          </span>
+        </button>
 
         <div className="h-3.5 w-[1px] bg-slate-800" />
 

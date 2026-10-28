@@ -159,7 +159,6 @@ export const TorrentList: React.FC<TorrentListProps> = ({
                     <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('dlSpeed')}>DL SPEED</th>
                     <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('ulSpeed')}>UL SPEED</th>
                     <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('eta')}>ETA</th>
-                    <th className="px-3 py-2">SEEDS</th>
                     <th className="px-3 py-2">PEERS</th>
                   </tr>
                 </thead>

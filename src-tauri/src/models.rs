@@ -48,17 +48,27 @@ pub struct TorrentItem {
     pub piece_count: usize,
     pub pieces_completed: usize,
     pub pieces_bitfield: Vec<u8>,
+    /// Per-file downloaded byte counts, in `files` order (straight from librqbit).
+    pub file_progress: Vec<u64>,
+    /// Announce URLs declared by the torrent metadata.
+    pub trackers: Vec<String>,
     pub created_at: i64,
     pub completed_at: Option<i64>,
     pub backed_up: bool,
     pub backup_path: Option<String>,
     pub priority: String,
+    /// Last error reported by librqbit for this torrent, if any.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientSettings {
+    /// Empty string means "unset" — MakeMake then asks for a location every time.
     pub default_download_dir: String,
+    /// When true the native folder picker is shown for every new torrent.
+    #[serde(default = "default_true")]
+    pub always_ask_download_dir: bool,
     pub auto_backup_enabled: bool,
     pub backup_interval_hours: u32,
     pub backup_dir: String,
@@ -66,9 +76,61 @@ pub struct ClientSettings {
     pub completed_torrent_dir: String,
     pub max_download_speed: u64,
     pub max_upload_speed: u64,
+    /// Alternate (turtle) throttle limits, applied while `turtle_mode_enabled` is true.
+    #[serde(default)]
+    pub turtle_mode_enabled: bool,
+    #[serde(default = "default_turtle_download")]
+    pub turtle_download_speed: u64,
+    #[serde(default = "default_turtle_upload")]
+    pub turtle_upload_speed: u64,
+    /// Keep seeding once a download finishes.
+    #[serde(default = "default_true")]
+    pub seed_after_complete: bool,
     pub listen_port: u16,
     pub enable_sound_fx: bool,
     pub theme: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_turtle_download() -> u64 {
+    512 * 1024
+}
+
+fn default_turtle_upload() -> u64 {
+    64 * 1024
+}
+
+impl ClientSettings {
+    /// Limits that are actually applied to the live session right now.
+    pub fn effective_limits(&self) -> (u64, u64) {
+        if self.turtle_mode_enabled {
+            (self.turtle_download_speed, self.turtle_upload_speed)
+        } else {
+            (self.max_download_speed, self.max_upload_speed)
+        }
+    }
+}
+
+/// One connected swarm peer, straight from librqbit's live peer registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerDetail {
+    pub address: String,
+    pub state: String,
+    pub client: Option<String>,
+    pub connection: Option<String>,
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupResult {
+    pub success: bool,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

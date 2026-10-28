@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Settings,
   FolderOpen,
@@ -9,6 +9,7 @@ import {
   X,
   Volume2,
   VolumeX,
+  Sliders,
 } from 'lucide-react';
 import { ClientSettings } from '../types/torrent';
 import { TauriBridge } from '../api/tauriBridge';
@@ -28,10 +29,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [formData, setFormData] = useState<ClientSettings>({ ...settings });
 
+  // Re-sync whenever the modal is reopened (settings may have changed elsewhere).
+  useEffect(() => {
+    if (isOpen) setFormData({ ...settings });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const handleBrowse = async (field: 'defaultDownloadDir' | 'backupDir' | 'completedTorrentDir') => {
-    const selected = await TauriBridge.selectDirectory('Select Folder');
+    const selected = await TauriBridge.selectDirectory(
+      'Select Folder',
+      formData[field] || undefined,
+    );
     if (selected) {
       setFormData((prev) => ({ ...prev, [field]: selected }));
     }
@@ -83,6 +93,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 type="text"
                 value={formData.defaultDownloadDir}
                 onChange={(e) => setFormData({ ...formData, defaultDownloadDir: e.target.value })}
+                placeholder="Leave empty to be asked every time"
                 className="flex-1 px-3 py-2 rounded bg-obsidian-950 border border-slate-700 font-mono text-xs text-slate-100 focus:outline-none focus:border-cyber-cyan"
               />
               <button
@@ -92,6 +103,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               >
                 <span>Browse...</span>
               </button>
+              <button
+                type="button"
+                onClick={() => setFormData({ ...formData, defaultDownloadDir: '' })}
+                className="px-3 py-2 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-mono text-slate-300"
+                title="Unset the default location so MakeMake asks every time"
+              >
+                Clear
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between p-2.5 rounded bg-obsidian-950/60 border border-slate-800">
+              <div className="text-[11px] font-mono text-slate-300">
+                PROMPT FOR A DESTINATION ON EVERY NEW TORRENT
+              </div>
+              <input
+                type="checkbox"
+                checked={formData.alwaysAskDownloadDir}
+                onChange={(e) =>
+                  setFormData({ ...formData, alwaysAskDownloadDir: e.target.checked })
+                }
+                className="w-4 h-4 rounded border-slate-700 text-cyber-cyan focus:ring-0"
+              />
+            </div>
+
+            <div className="text-[10px] font-mono text-slate-500 leading-relaxed">
+              With the prompt enabled you choose the folder for every .torrent file and every
+              magnet link (magnet prompts appear as soon as the swarm returns the metadata). If no
+              default is configured, MakeMake falls back to your system Downloads folder.
             </div>
           </div>
 
@@ -212,7 +251,108 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
           </div>
 
-          {/* Section 4: Network & Theme Settings */}
+          {/* Section 4: Bandwidth Throttles & Seeding */}
+          <div className="p-4 rounded-lg bg-obsidian-950/80 border border-cyber-cyan/30 space-y-4">
+            <div className="flex items-center space-x-2 text-xs font-mono font-bold text-cyber-cyan">
+              <Sliders className="w-4 h-4" />
+              <span>BANDWIDTH CALDERA (KB/s, 0 = UNLIMITED)</span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[11px] font-mono text-slate-300 mb-1">
+                  MAX DOWNLOAD SPEED:
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={Math.round(formData.maxDownloadSpeed / 1024)}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      maxDownloadSpeed: Math.max(0, parseInt(e.target.value) || 0) * 1024,
+                    })
+                  }
+                  className="w-full px-3 py-1.5 rounded bg-obsidian-900 border border-slate-700 font-mono text-xs text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-mono text-slate-300 mb-1">
+                  MAX UPLOAD SPEED:
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={Math.round(formData.maxUploadSpeed / 1024)}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      maxUploadSpeed: Math.max(0, parseInt(e.target.value) || 0) * 1024,
+                    })
+                  }
+                  className="w-full px-3 py-1.5 rounded bg-obsidian-900 border border-slate-700 font-mono text-xs text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 pt-2 border-t border-slate-800/80">
+              <div>
+                <label className="block text-[11px] font-mono text-slate-300 mb-1">
+                  TURTLE DOWNLOAD SPEED:
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={Math.round(formData.turtleDownloadSpeed / 1024)}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      turtleDownloadSpeed: Math.max(0, parseInt(e.target.value) || 0) * 1024,
+                    })
+                  }
+                  className="w-full px-3 py-1.5 rounded bg-obsidian-900 border border-slate-700 font-mono text-xs text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-mono text-slate-300 mb-1">
+                  TURTLE UPLOAD SPEED:
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={Math.round(formData.turtleUploadSpeed / 1024)}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      turtleUploadSpeed: Math.max(0, parseInt(e.target.value) || 0) * 1024,
+                    })
+                  }
+                  className="w-full px-3 py-1.5 rounded bg-obsidian-900 border border-slate-700 font-mono text-xs text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between p-2.5 rounded bg-obsidian-900/60 border border-slate-800">
+              <div className="text-[11px] font-mono text-slate-300">
+                KEEP SEEDING AFTER THE DOWNLOAD COMPLETES
+              </div>
+              <input
+                type="checkbox"
+                checked={formData.seedAfterComplete}
+                onChange={(e) =>
+                  setFormData({ ...formData, seedAfterComplete: e.target.checked })
+                }
+                className="w-4 h-4 rounded border-slate-700 text-cyber-green focus:ring-0"
+              />
+            </div>
+
+            <div className="text-[10px] font-mono text-slate-500 leading-relaxed">
+              Throttles are applied live to the librqbit session. The turtle profile can be toggled
+              from the status bar without touching these caps.
+            </div>
+          </div>
+
+          {/* Section 5: Network & Theme Settings */}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-mono text-slate-300 mb-1">

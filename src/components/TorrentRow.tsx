@@ -115,7 +115,6 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
         <td className="px-3 py-2 text-cyber-cyan font-bold">{formatSpeed(torrent.downloadSpeed)}</td>
         <td className="px-3 py-2 text-cyber-red font-bold">{formatSpeed(torrent.uploadSpeed)}</td>
         <td className="px-3 py-2 text-slate-400">{formatEta(torrent.etaSeconds)}</td>
-        <td className="px-3 py-2 text-slate-400">{torrent.seedsConnected}/{torrent.seedsTotal}</td>
         <td className="px-3 py-2 text-slate-400">{torrent.peersConnected}/{torrent.peersTotal}</td>
       </tr>
     );
@@ -236,10 +235,6 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
 
           <div className="flex items-center space-x-1 text-slate-400">
             <Users className="w-3 h-3 text-cyber-gold" />
-            <span>
-              SEEDS: <strong className="text-slate-200">{torrent.seedsConnected}</strong>/{torrent.seedsTotal}
-            </span>
-            <span className="text-slate-600">|</span>
             <span>
               PEERS: <strong className="text-slate-200">{torrent.peersConnected}</strong>/{torrent.peersTotal}
             </span>

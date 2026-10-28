@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Header } from './components/Header';
 import { Sidebar, TorrentFilter } from './components/Sidebar';
 import { TorrentList } from './components/TorrentList';
-import { TorrentDetailsDrawer } from './components/TorrentDetailsDrawer';
+import { TorrentDetailsDrawer, DetailTab } from './components/TorrentDetailsDrawer';
 import { FooterStatusBar } from './components/FooterStatusBar';
 import { ContextMenu } from './components/ContextMenu';
 import { ConfirmModal } from './components/ConfirmModal';
@@ -24,14 +24,19 @@ export const App: React.FC = () => {
   const [bgVideoEnabled, setBgVideoEnabled] = useState(true);
 
   const [settings, setSettings] = useState<ClientSettings>({
-    defaultDownloadDir: 'C:/MakeMake/Downloads',
+    defaultDownloadDir: '',
+    alwaysAskDownloadDir: true,
     autoBackupEnabled: true,
     backupIntervalHours: 6,
-    backupDir: 'C:/MakeMake/TorrentBackups',
+    backupDir: '',
     moveCompletedTorrentEnabled: true,
-    completedTorrentDir: 'C:/MakeMake/CompletedTorrents',
+    completedTorrentDir: '',
     maxDownloadSpeed: 0,
     maxUploadSpeed: 0,
+    turtleModeEnabled: false,
+    turtleDownloadSpeed: 512 * 1024,
+    turtleUploadSpeed: 64 * 1024,
+    seedAfterComplete: true,
     listenPort: 6881,
     enableSoundFx: true,
     theme: 'cyber-obsidian',
@@ -41,7 +46,7 @@ export const App: React.FC = () => {
     globalDownloadSpeed: 0,
     globalUploadSpeed: 0,
     totalActivePeers: 0,
-    dhtNodes: 8492,
+    dhtNodes: 0,
     totalTorrents: 0,
     activeTorrents: 0,
     totalDownloadedAllTime: 0,
@@ -56,6 +61,16 @@ export const App: React.FC = () => {
   } | null>(null);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  // Tab the details drawer should show (context menu can jump straight to Files)
+  const [drawerTab, setDrawerTab] = useState<DetailTab>('overview');
+
+  // Lightweight themed toast (replaces browser alert() popups)
+  const [toast, setToast] = useState<{ message: string; tone: 'info' | 'danger' } | null>(null);
+  const showToast = useCallback((message: string, tone: 'info' | 'danger' = 'info') => {
+    setToast({ message, tone });
+    window.setTimeout(() => setToast(null), 3500);
+  }, []);
 
   // Context Menu State
   const [contextMenu, setContextMenu] = useState<{
@@ -125,18 +140,33 @@ export const App: React.FC = () => {
     const handleDragOver = (e: DragEvent) => e.preventDefault();
     const handleDrop = async (e: DragEvent) => {
       e.preventDefault();
-      if (e.dataTransfer && e.dataTransfer.files.length > 0) {
-        const file = e.dataTransfer.files[0];
-        if (file.name.endsWith('.torrent')) {
-          setInitialAddPayload({
-            type: 'file',
-            data: 'dummyBase64',
-            name: file.name,
-          });
-          setIsAddModalOpen(true);
-          cyberAudio.playEngage();
-        }
+      const file = e.dataTransfer?.files?.[0];
+      if (!file || !file.name.toLowerCase().endsWith('.torrent')) {
+        return;
       }
+
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = typeof reader.result === 'string' ? reader.result : '';
+          resolve(result.includes(',') ? result.slice(result.indexOf(',') + 1) : result);
+        };
+        reader.onerror = () => reject(new Error(`Cannot read ${file.name}`));
+        reader.readAsDataURL(file);
+      }).catch((err: unknown) => {
+        console.error('Failed to read dropped torrent file', err);
+        return '';
+      });
+
+      if (!base64) return;
+
+      setInitialAddPayload({
+        type: 'file',
+        data: base64,
+        name: file.name,
+      });
+      setIsAddModalOpen(true);
+      cyberAudio.playEngage();
     };
 
     window.addEventListener('dragover', handleDragOver);
@@ -163,29 +193,62 @@ export const App: React.FC = () => {
       } else if ((e.key === 'i' || e.key === 'I') && !e.ctrlKey) {
         setIsDrawerOpen((prev) => !prev);
         cyberAudio.playClick();
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        (e.key === 'v' || e.key === 'V') &&
+        !isAddModalOpen &&
+        !isSettingsOpen
+      ) {
+        // Paste a magnet link straight from the system clipboard.
+        navigator.clipboard
+          .readText()
+          .then((text) => {
+            const trimmed = text.trim();
+            if (trimmed.startsWith('magnet:?')) {
+              cyberAudio.playEngage();
+              setInitialAddPayload({ type: 'magnet', data: trimmed });
+              setIsAddModalOpen(true);
+            }
+          })
+          .catch(() => {
+            /* clipboard read not permitted — user can paste into the modal */
+          });
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedTorrent]);
+  }, [selectedTorrent, isAddModalOpen, isSettingsOpen]);
 
   // Operation Handlers
   const handleStart = async (id: string) => {
     cyberAudio.playClick();
-    await TauriBridge.startTorrent(id);
+    try {
+      await TauriBridge.startTorrent(id);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
     refreshData();
   };
 
   const handlePause = async (id: string) => {
     cyberAudio.playClick();
-    await TauriBridge.pauseTorrent(id);
+    try {
+      await TauriBridge.pauseTorrent(id);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
     refreshData();
   };
 
   const handleRecheck = async (id: string) => {
     cyberAudio.playClick();
-    await TauriBridge.forceRecheck(id);
+    try {
+      await TauriBridge.forceRecheck(id);
+      showToast('Integrity verification started');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
     refreshData();
   };
 
@@ -196,9 +259,113 @@ export const App: React.FC = () => {
 
   const handleBackupNow = async (id: string) => {
     cyberAudio.playClick();
-    const res = await TauriBridge.backupTorrentNow(id);
-    alert(`Torrent successfully archived to:\n${res.path}`);
+    try {
+      const res = await TauriBridge.backupTorrentNow(id);
+      showToast(`Torrent archived to ${res.path}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
     refreshData();
+  };
+
+  const handlePauseAll = async () => {
+    cyberAudio.playHazard();
+    try {
+      await TauriBridge.pauseAll();
+      showToast('All monoliths placed in dormant state');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
+    refreshData();
+  };
+
+  const handleResumeAll = async () => {
+    cyberAudio.playEngage();
+    try {
+      await TauriBridge.resumeAll();
+      showToast('All monoliths re-awakened');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
+    refreshData();
+  };
+
+  const handleSetPriority = async (id: string, priority: TorrentItem['priority']) => {
+    cyberAudio.playClick();
+    try {
+      await TauriBridge.setPriority(id, priority);
+      showToast(`Priority set to ${priority}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
+    refreshData();
+  };
+
+  const handleExportTorrent = async (torrent: TorrentItem) => {
+    cyberAudio.playClick();
+    try {
+      const target = await TauriBridge.chooseSaveTorrentPath(`${torrent.name}.torrent`);
+      if (!target) return;
+      const res = await TauriBridge.exportTorrent(torrent.id, target);
+      showToast(`.torrent metadata saved to ${res.path}`);
+      refreshData();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
+  };
+
+  const handleCopy = async (text: string, label: string) => {
+    cyberAudio.playClick();
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(`${label} copied to clipboard`);
+    } catch {
+      showToast(`Cannot access the clipboard`, 'danger');
+    }
+  };
+
+  const handleRevealPath = async (path: string) => {
+    try {
+      await TauriBridge.revealPath(path);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
+  };
+
+  const handleOpenPath = async (path: string) => {
+    try {
+      await TauriBridge.openPath(path);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
+  };
+
+  const handleEditFiles = (torrent: TorrentItem) => {
+    cyberAudio.playClick();
+    setSelectedTorrent(torrent);
+    setDrawerTab('files');
+    setIsDrawerOpen(true);
+  };
+
+  const handleApplyFileSelection = async (id: string, files: number[]) => {
+    try {
+      await TauriBridge.setFileSelection(id, files);
+      showToast(`Payload selection updated (${files.length} file${files.length === 1 ? '' : 's'})`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
+    refreshData();
+  };
+
+  const handleToggleTurtle = async () => {
+    cyberAudio.playClick();
+    try {
+      const updated = await TauriBridge.setTurtleMode(!settings.turtleModeEnabled);
+      setSettings(updated);
+      showToast(updated.turtleModeEnabled ? 'Turtle throttle engaged' : 'Full-speed throttle engaged');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
   };
 
   // Safe removal prompt (removes from list only)
@@ -245,8 +412,15 @@ export const App: React.FC = () => {
 
   const handleAddConfirm = async (preview: TorrentMetadataPreview, targetDir: string) => {
     cyberAudio.playEngage();
-    await TauriBridge.addTorrent(preview, targetDir);
     setIsAddModalOpen(false);
+    try {
+      const item = await TauriBridge.addTorrent(preview, targetDir);
+      setSelectedTorrent(item);
+      setInitialAddPayload(null);
+      showToast(`Swarm engaged: ${item.name}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
     refreshData();
   };
 
@@ -315,6 +489,9 @@ export const App: React.FC = () => {
           setIsSettingsOpen(true);
         }}
         onShowSplash={() => setShowSplash(true)}
+        onPauseAll={handlePauseAll}
+        onResumeAll={handleResumeAll}
+        torrentCount={torrents.length}
       />
 
       {/* Main Client Body: Sidebar + Torrent Deck + Details Drawer */}
@@ -327,6 +504,9 @@ export const App: React.FC = () => {
           }}
           counts={counts}
           selectedTorrentName={selectedTorrent?.name}
+          activePeers={stats.totalActivePeers}
+          torrents={torrents}
+          stats={stats}
         />
 
         <div className="flex-1 flex flex-col overflow-hidden">
@@ -358,8 +538,13 @@ export const App: React.FC = () => {
             <TorrentDetailsDrawer
               torrent={selectedTorrent}
               isOpen={isDrawerOpen}
+              activeTab={drawerTab}
+              onTabChange={setDrawerTab}
               onClose={() => setIsDrawerOpen(false)}
               onOpenFolder={handleOpenFolder}
+              onRevealPath={handleRevealPath}
+              onOpenPath={handleOpenPath}
+              onApplyFileSelection={handleApplyFileSelection}
             />
           )}
         </div>
@@ -386,6 +571,8 @@ export const App: React.FC = () => {
           setViewMode(mode);
         }}
         backupIntervalHours={settings.backupIntervalHours}
+        settings={settings}
+        onToggleTurtle={handleToggleTurtle}
       />
 
       {/* Floating Right-Click Context Menu */}
@@ -399,7 +586,13 @@ export const App: React.FC = () => {
           onPause={handlePause}
           onRecheck={handleRecheck}
           onOpenFolder={handleOpenFolder}
+          onRevealPath={handleRevealPath}
+          onOpenPath={handleOpenPath}
+          onCopy={handleCopy}
+          onSetPriority={handleSetPriority}
           onBackupNow={handleBackupNow}
+          onExportTorrent={handleExportTorrent}
+          onEditFiles={handleEditFiles}
           onRemovePrompt={handleRemovePrompt}
           onDeleteFilesPrompt={handleDeleteFilesPrompt}
         />
@@ -422,6 +615,7 @@ export const App: React.FC = () => {
       <AddTorrentModal
         isOpen={isAddModalOpen}
         defaultDownloadDir={settings.defaultDownloadDir}
+        alwaysAskDownloadDir={settings.alwaysAskDownloadDir}
         initialMagnetOrFile={initialAddPayload}
         onClose={() => setIsAddModalOpen(false)}
         onAddConfirm={handleAddConfirm}
@@ -434,6 +628,20 @@ export const App: React.FC = () => {
         onClose={() => setIsSettingsOpen(false)}
         onSave={handleSaveSettings}
       />
+
+      {/* Themed Toast Notifications */}
+      {toast && (
+        <div
+          className={`fixed bottom-12 right-5 z-[60] max-w-md px-4 py-2.5 rounded-lg border font-mono text-[11px] shadow-2xl backdrop-blur-md animate-fadeIn ${
+            toast.tone === 'danger'
+              ? 'bg-red-950/90 border-cyber-red/60 text-red-200'
+              : 'bg-obsidian-900/95 border-cyber-cyan/50 text-cyber-cyan'
+          }`}
+          role="status"
+        >
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 };

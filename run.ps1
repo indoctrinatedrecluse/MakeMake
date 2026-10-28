@@ -37,6 +37,7 @@ param(
     [switch]$Release,
     [switch]$Installer,
     [switch]$SkipBuild,
+    [switch]$Console,
     [int]$Port = 1420,
     [switch]$Help
 )
@@ -83,6 +84,15 @@ if (-not (Test-Path "$ProjectRoot\node_modules")) {
 }
 
 # 2. Build Pipeline
+# A running instance keeps a lock on makemake.exe, which would make the cargo
+# link step fail with "Access is denied", so close it before building.
+$running = Get-Process -Name 'makemake' -ErrorAction SilentlyContinue
+if ($running) {
+    Write-Host "[1/3] Closing running MakeMake instance(s) before rebuild..." -ForegroundColor Yellow
+    $running | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 600
+}
+
 if ($Installer) {
     Write-Host "[2/3] Compiling and packaging MakeMake Windows NSIS Installer..." -ForegroundColor Cyan
     npm run build
@@ -107,6 +117,10 @@ if (-not $SkipBuild) {
         if ($Release) {
             $CargoArgs += '--release'
         }
+        if ($Console) {
+            $CargoArgs += '--features'
+            $CargoArgs += 'console'
+        }
         & cargo @CargoArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Cargo build failed with exit code $LASTEXITCODE."
@@ -129,8 +143,9 @@ if ($Mode -eq 'Desktop') {
         exit 1
     }
 
-    # Start-Process detached so closing the PowerShell console does not terminate the app
-    $Proc = Start-Process -FilePath $BinaryPath -WorkingDirectory $ProjectRoot -PassThru
+    # Start-Process detached and hidden so no console window ever appears next to
+    # the GUI (the debug binary would otherwise attach a visible console).
+    $Proc = Start-Process -FilePath $BinaryPath -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru
 
     # Allow a brief moment for the window to initialize and verify process health
     Start-Sleep -Milliseconds 800

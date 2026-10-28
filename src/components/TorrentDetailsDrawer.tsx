@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Maximize2,
@@ -14,31 +14,88 @@ import {
   Check,
   ShieldCheck,
   ShieldAlert,
+  CheckSquare,
+  Square,
+  Save,
+  ExternalLink,
 } from 'lucide-react';
-import { TorrentItem, TorrentFileItem } from '../types/torrent';
+import { TorrentItem, TorrentFileItem, PeerDetail } from '../types/torrent';
 import { CyberProgressBar } from './gizmos/CyberProgressBar';
 import { SpeedOscilloscope } from './gizmos/SpeedOscilloscope';
 import { AhuBlockMatrix } from './gizmos/AhuBlockMatrix';
 import { cyberAudio } from '../utils/cyberAudio';
+import { TauriBridge } from '../api/tauriBridge';
 
 export type DetailTab = 'overview' | 'graph' | 'peers' | 'files' | 'pieces' | 'trackers';
 
 interface TorrentDetailsDrawerProps {
   torrent: TorrentItem;
   isOpen: boolean;
+  activeTab?: DetailTab;
+  onTabChange?: (tab: DetailTab) => void;
   onClose: () => void;
   onOpenFolder: (path: string) => void;
+  onRevealPath?: (path: string) => void;
+  onOpenPath?: (path: string) => void;
+  onApplyFileSelection?: (id: string, files: number[]) => void;
 }
 
 export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
   torrent,
   isOpen,
+  activeTab: activeTabProp,
+  onTabChange,
   onClose,
   onOpenFolder,
+  onRevealPath,
+  onOpenPath,
+  onApplyFileSelection,
 }) => {
   const [activeTab, setActiveTab] = useState<DetailTab>('overview');
   const [isExpanded, setIsExpanded] = useState(false);
   const [copiedHash, setCopiedHash] = useState(false);
+  const [peers, setPeers] = useState<PeerDetail[]>([]);
+  const [peersError, setPeersError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<Set<number>>(new Set());
+  const [selectionDirty, setSelectionDirty] = useState(false);
+
+  // Keep the tab in sync with the tab requested by the context menu / app shell.
+  useEffect(() => {
+    if (activeTabProp) setActiveTab(activeTabProp);
+  }, [activeTabProp]);
+
+  const selectionSignature = torrent.files.map((f) => (f.selected ? '1' : '0')).join('');
+
+  useEffect(() => {
+    setSelection(new Set(torrent.files.filter((f) => f.selected).map((f) => f.index)));
+    setSelectionDirty(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [torrent.id, selectionSignature]);
+
+  // Real peer rows from librqbit's live peer registry (only while the tab is visible).
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'peers') return;
+
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const rows = await TauriBridge.getTorrentPeers(torrent.id);
+        if (!cancelled) {
+          setPeers(rows);
+          setPeersError(null);
+        }
+      } catch (err) {
+        if (!cancelled) setPeersError(err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    void load();
+    const timer = window.setInterval(load, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isOpen, activeTab, torrent.id]);
 
   if (!isOpen) return null;
 
@@ -64,23 +121,8 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
     return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
   };
 
-  // Mock Peers Data for Wayfinding Tab
-  const mockPeers = [
-    { ip: '185.190.141.22', port: 51413, client: 'MakeMake/0.1.0 (Rapa Nui)', country: 'CL', dl: 4200000, ul: 350000, progress: 94.2, hopu: 'DIVING (DL)' },
-    { ip: '89.207.132.88', port: 6881, client: 'qBittorrent/5.0.2', country: 'NZ', dl: 3800000, ul: 210000, progress: 100.0, hopu: 'EGG SECURED (SEED)' },
-    { ip: '142.250.180.46', port: 59384, client: 'Transmission/4.0.5', country: 'US', dl: 2100000, ul: 120000, progress: 78.5, hopu: 'DIVING (DL)' },
-    { ip: '198.51.100.14', port: 6889, client: 'libtorrent/2.0.10', country: 'DE', dl: 1850000, ul: 95000, progress: 62.0, hopu: 'DIVING (DL)' },
-    { ip: '203.0.113.82', port: 49152, client: 'MakeMake/0.1.0 (Rapa Nui)', country: 'PF', dl: 1450000, ul: 84000, progress: 85.3, hopu: 'SNATCHING' },
-    { ip: '192.0.2.201', port: 52100, client: 'Deluge/2.1.1', country: 'JP', dl: 0, ul: 0, progress: 41.2, hopu: 'CHOKED' },
-  ];
-
-  // Mock Trackers Data for Oracles Tab
-  const mockTrackers = [
-    { url: 'udp://tracker.opentrackr.org:1337/announce', status: 'Working [200 OK]', seeds: 64, peers: 128, downloaded: 4892, nextAnnounce: '18m 42s' },
-    { url: 'udp://open.demonii.com:1337/announce', status: 'Working [200 OK]', seeds: 42, peers: 86, downloaded: 3120, nextAnnounce: '22m 10s' },
-    { url: 'https://tracker.makemake.sw:6969/announce', status: 'Sacred Oracle [Synced]', seeds: 38, peers: 54, downloaded: 1240, nextAnnounce: '11m 05s' },
-    { url: 'udp://explodie.org:6969/announce', status: 'Working [200 OK]', seeds: 29, peers: 60, downloaded: 2014, nextAnnounce: '27m 50s' },
-  ];
+  // Real announce URLs reported by the torrent metadata (empty = DHT-only swarm).
+  const trackers = torrent.trackers ?? [];
 
   return (
     <div
@@ -98,7 +140,7 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
             { id: 'peers' as DetailTab, label: `Wayfinding Peers (${torrent.peersConnected})`, icon: Users },
             { id: 'files' as DetailTab, label: `Files (${torrent.files.length})`, icon: FileCode },
             { id: 'pieces' as DetailTab, label: 'Piece Matrix', icon: Grid },
-            { id: 'trackers' as DetailTab, label: 'Oracles / Trackers (4)', icon: Radio },
+            { id: 'trackers' as DetailTab, label: `Oracles / Trackers (${trackers.length})`, icon: Radio },
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -107,6 +149,7 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                 key={tab.id}
                 onClick={() => {
                   setActiveTab(tab.id);
+                  onTabChange?.(tab.id);
                   cyberAudio.playTabSwitch();
                 }}
                 className={`px-3 py-1.5 rounded-t-md flex items-center space-x-2 transition-all ${
@@ -263,6 +306,12 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
               </div>
 
               <div className="space-y-2 text-[11px]">
+                {torrent.error && (
+                  <div className="rounded border border-cyber-red/50 bg-red-950/40 px-2 py-1.5 text-[10px] text-red-300 flex items-start gap-1.5">
+                    <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                    <span className="break-all">{torrent.error}</span>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <span className="text-slate-400">CURRENT DL RATE:</span>
                   <span className="text-cyber-cyan font-bold">{formatSpeed(torrent.downloadSpeed)}</span>
@@ -280,12 +329,12 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">CONNECTED SEEDS:</span>
-                  <span className="text-slate-200 font-bold">{torrent.seedsConnected} of {torrent.seedsTotal}</span>
-                </div>
-                <div className="flex justify-between">
                   <span className="text-slate-400">CONNECTED PEERS:</span>
                   <span className="text-slate-200 font-bold">{torrent.peersConnected} of {torrent.peersTotal}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">PRIORITY:</span>
+                  <span className="text-cyber-gold font-bold uppercase">{torrent.priority}</span>
                 </div>
               </div>
             </div>
@@ -303,71 +352,163 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
           </div>
         )}
 
-        {/* TAB 3: WAYFINDING PEERS */}
+        {/* TAB 3: WAYFINDING PEERS (real librqbit counters) */}
         {activeTab === 'peers' && (
-          <div className="rounded border border-slate-800 overflow-hidden">
-            <table className="w-full text-left divide-y divide-slate-800 text-[11px]">
-              <thead className="bg-obsidian-900 text-slate-400 font-bold">
-                <tr>
-                  <th className="px-3 py-2">NODE IP / PORT</th>
-                  <th className="px-3 py-2">REGION</th>
-                  <th className="px-3 py-2">CLIENT ENGINE</th>
-                  <th className="px-3 py-2">HOPU STATUS</th>
-                  <th className="px-3 py-2">DL SPEED</th>
-                  <th className="px-3 py-2">UL SPEED</th>
-                  <th className="px-3 py-2">PROGRESS</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60 bg-obsidian-950/80">
-                {mockPeers.map((peer, i) => (
-                  <tr key={i} className="hover:bg-slate-800/40">
-                    <td className="px-3 py-2 font-mono text-cyber-cyan font-bold">{peer.ip}:{peer.port}</td>
-                    <td className="px-3 py-2 text-cyber-gold font-bold">{peer.country}</td>
-                    <td className="px-3 py-2 text-slate-300">{peer.client}</td>
-                    <td className="px-3 py-2">
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                        peer.hopu.includes('SEED')
-                          ? 'bg-cyber-green/20 text-cyber-green'
-                          : peer.hopu.includes('DIVING')
-                          ? 'bg-cyber-cyan/20 text-cyber-cyan'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}>
-                        {peer.hopu}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-cyber-cyan">{formatSpeed(peer.dl)}</td>
-                    <td className="px-3 py-2 text-cyber-red">{formatSpeed(peer.ul)}</td>
-                    <td className="px-3 py-2 w-32">
-                      <div className="flex items-center space-x-2">
-                        <div className="flex-1 h-1.5 bg-slate-800 rounded overflow-hidden">
-                          <div className="h-full bg-cyber-cyan" style={{ width: `${peer.progress}%` }} />
-                        </div>
-                        <span className="text-[10px]">{peer.progress}%</span>
-                      </div>
-                    </td>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 font-mono">
+              {[
+                { label: 'LIVE PEERS', value: torrent.peersConnected, tone: 'text-cyber-cyan' },
+                { label: 'PEERS SEEN', value: torrent.peersTotal, tone: 'text-slate-200' },
+                { label: 'DOWN RATE', value: formatSpeed(torrent.downloadSpeed), tone: 'text-cyber-cyan' },
+                { label: 'UP RATE', value: formatSpeed(torrent.uploadSpeed), tone: 'text-cyber-red' },
+              ].map((stat) => (
+                <div
+                  key={stat.label}
+                  className="rounded border border-slate-800 bg-obsidian-950/80 px-3 py-2"
+                >
+                  <div className="text-[9px] font-bold text-slate-500">{stat.label}</div>
+                  <div className={`text-lg font-bold ${stat.tone}`}>{stat.value}</div>
+                </div>
+              ))}
+            </div>
+            <div className="rounded border border-slate-800 overflow-hidden">
+              <table className="w-full text-left divide-y divide-slate-800 text-[11px]">
+                <thead className="bg-obsidian-900 text-slate-400 font-bold">
+                  <tr>
+                    <th className="px-3 py-2">PEER ADDRESS</th>
+                    <th className="px-3 py-2">STATE</th>
+                    <th className="px-3 py-2">CLIENT</th>
+                    <th className="px-3 py-2">TRANSPORT</th>
+                    <th className="px-3 py-2">DOWN</th>
+                    <th className="px-3 py-2">UP</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 bg-obsidian-950/80">
+                  {peers.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-3 py-4 text-[11px] font-mono text-slate-400">
+                        {peersError
+                          ? `Peer telemetry unavailable: ${peersError}`
+                          : torrent.peersConnected > 0
+                          ? 'Peer registry is warming up — rows appear as soon as the connections finish the handshake.'
+                          : 'NO PEERS CONNECTED — the engine has not established a peer connection for this torrent yet.'}
+                      </td>
+                    </tr>
+                  ) : (
+                    peers.map((peer) => (
+                      <tr key={peer.address} className="hover:bg-slate-800/40">
+                        <td className="px-3 py-1.5 font-mono text-cyber-cyan">{peer.address}</td>
+                        <td className="px-3 py-1.5 text-slate-300">{peer.state}</td>
+                        <td className="px-3 py-1.5 text-slate-400 truncate max-w-[180px]">
+                          {peer.client || 'unknown'}
+                        </td>
+                        <td className="px-3 py-1.5 text-slate-500 uppercase">
+                          {peer.connection || '—'}
+                        </td>
+                        <td className="px-3 py-1.5 text-cyber-cyan">
+                          {formatBytes(peer.downloadedBytes)}
+                        </td>
+                        <td className="px-3 py-1.5 text-cyber-red">
+                          {formatBytes(peer.uploadedBytes)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
-        {/* TAB 4: FILES */}
+        {/* TAB 4: FILES (with real per-file progress and payload selection) */}
         {activeTab === 'files' && (
-          <div className="rounded border border-slate-800 overflow-hidden">
-            <table className="w-full text-left divide-y divide-slate-800 text-[11px]">
-              <thead className="bg-obsidian-900 text-slate-400 font-bold">
-                <tr>
-                  <th className="px-3 py-2">#</th>
-                  <th className="px-3 py-2">FILE PATH</th>
-                  <th className="px-3 py-2">TOTAL SIZE</th>
-                  <th className="px-3 py-2">PROGRESS</th>
-                  <th className="px-3 py-2">PRIORITY</th>
-                </tr>
-              </thead>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-[11px] font-mono">
+              <div className="flex items-center gap-2 text-slate-400">
+                <button
+                  onClick={() => {
+                    setSelection(new Set(torrent.files.map((f) => f.index)));
+                    setSelectionDirty(true);
+                  }}
+                  className="text-cyber-cyan hover:underline"
+                >
+                  Select all
+                </button>
+                <span className="text-slate-600">•</span>
+                <button
+                  onClick={() => {
+                    setSelection(new Set());
+                    setSelectionDirty(true);
+                  }}
+                  className="text-slate-400 hover:underline"
+                >
+                  None
+                </button>
+                <span className="text-slate-600">•</span>
+                <span>
+                  {selection.size}/{torrent.files.length} selected
+                </span>
+              </div>
+
+              <button
+                onClick={() => {
+                  if (!onApplyFileSelection || selection.size === 0) return;
+                  onApplyFileSelection(torrent.id, Array.from(selection).sort((a, b) => a - b));
+                  setSelectionDirty(false);
+                  cyberAudio.playEngage();
+                }}
+                disabled={!selectionDirty || selection.size === 0 || !onApplyFileSelection}
+                className="cyber-button px-3 py-1 bg-cyber-cyan text-black font-bold disabled:opacity-40 flex items-center gap-1.5"
+                title="Apply the new payload selection to the live torrent"
+              >
+                <Save className="w-3.5 h-3.5" />
+                APPLY SELECTION
+              </button>
+            </div>
+
+            <div className="rounded border border-slate-800 overflow-hidden">
+              <table className="w-full text-left divide-y divide-slate-800 text-[11px]">
+                <thead className="bg-obsidian-900 text-slate-400 font-bold">
+                  <tr>
+                    <th className="px-2 py-2 w-8">DL</th>
+                    <th className="px-3 py-2">#</th>
+                    <th className="px-3 py-2">FILE PATH</th>
+                    <th className="px-3 py-2">TOTAL SIZE</th>
+                    <th className="px-3 py-2">PROGRESS</th>
+                    <th className="px-3 py-2">PRIORITY</th>
+                    <th className="px-3 py-2">ACTIONS</th>
+                  </tr>
+                </thead>
               <tbody className="divide-y divide-slate-800/60 bg-obsidian-950/80">
-                {torrent.files.map((file: TorrentFileItem) => (
+                {torrent.files.map((file: TorrentFileItem) => {
+                  const downloadedForFile = torrent.fileProgress?.[file.index];
+                  const fileProgress =
+                    downloadedForFile !== undefined && file.length > 0
+                      ? Math.min(100, (downloadedForFile / file.length) * 100)
+                      : torrent.progress;
+                    const isChecked = selection.has(file.index);
+                    const filePath = `${torrent.downloadDir}/${file.path || file.name}`;
+                    return (
                   <tr key={file.index} className="hover:bg-slate-800/40">
+                    <td className="px-2 py-2">
+                      <button
+                        onClick={() => {
+                          const next = new Set(selection);
+                          if (next.has(file.index)) next.delete(file.index);
+                          else next.add(file.index);
+                          setSelection(next);
+                          setSelectionDirty(true);
+                          cyberAudio.playClick();
+                        }}
+                        title="Include or exclude this file from the download"
+                      >
+                        {isChecked ? (
+                          <CheckSquare className="w-4 h-4 text-cyber-cyan" />
+                        ) : (
+                          <Square className="w-4 h-4 text-slate-500" />
+                        )}
+                      </button>
+                    </td>
                     <td className="px-3 py-2 text-slate-500">{file.index + 1}</td>
                     <td className="px-3 py-2 font-mono text-slate-200">{file.path || file.name}</td>
                     <td className="px-3 py-2 text-slate-400">{formatBytes(file.length)}</td>
@@ -376,21 +517,41 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                         <div className="flex-1 h-1.5 bg-slate-800 rounded overflow-hidden">
                           <div
                             className="h-full bg-cyber-cyan"
-                            style={{ width: `${torrent.progress}%` }}
+                            style={{ width: `${fileProgress}%` }}
                           />
                         </div>
-                        <span className="text-[10px] text-cyber-cyan">{torrent.progress.toFixed(0)}%</span>
+                        <span className="text-[10px] text-cyber-cyan">{fileProgress.toFixed(0)}%</span>
                       </div>
                     </td>
                     <td className="px-3 py-2">
                       <span className="px-2 py-0.5 rounded bg-slate-800 text-cyber-cyan border border-slate-700 text-[10px] font-bold">
-                        NORMAL
+                        {torrent.priority.toUpperCase()}
                       </span>
                     </td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => onOpenPath?.(filePath)}
+                          className="text-slate-400 hover:text-cyber-cyan"
+                          title="Open this file with the default app"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => onRevealPath?.(filePath)}
+                          className="text-slate-400 hover:text-cyber-gold"
+                          title="Reveal this file in Explorer"
+                        >
+                          <FolderOpen className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
+            </div>
           </div>
         )}
 
@@ -413,24 +574,35 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
               <thead className="bg-obsidian-900 text-slate-400 font-bold">
                 <tr>
                   <th className="px-3 py-2">ORACLE ANNOUNCE URL</th>
-                  <th className="px-3 py-2">STATUS</th>
-                  <th className="px-3 py-2">SEEDS</th>
-                  <th className="px-3 py-2">PEERS</th>
-                  <th className="px-3 py-2">DOWNLOADS</th>
-                  <th className="px-3 py-2">NEXT COMMUNION</th>
+                  <th className="px-3 py-2">TRANSPORT</th>
+                  <th className="px-3 py-2">ENGINE</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 bg-obsidian-950/80">
-                {mockTrackers.map((tracker, i) => (
-                  <tr key={i} className="hover:bg-slate-800/40">
-                    <td className="px-3 py-2 font-mono text-cyber-cyan font-bold">{tracker.url}</td>
-                    <td className="px-3 py-2 text-cyber-green font-bold">{tracker.status}</td>
-                    <td className="px-3 py-2 text-slate-200">{tracker.seeds}</td>
-                    <td className="px-3 py-2 text-slate-200">{tracker.peers}</td>
-                    <td className="px-3 py-2 text-slate-400">{tracker.downloaded}</td>
-                    <td className="px-3 py-2 text-cyber-gold">{tracker.nextAnnounce}</td>
+                {trackers.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="px-3 py-4 font-mono text-slate-400">
+                      This torrent declares no HTTP/UDP trackers — the swarm is discovered through
+                      DHT only.
+                    </td>
                   </tr>
-                ))}
+                ) : (
+                  trackers.map((url) => (
+                    <tr key={url} className="hover:bg-slate-800/40">
+                      <td className="px-3 py-2 font-mono font-bold text-cyber-cyan break-all">
+                        {url}
+                      </td>
+                      <td className="px-3 py-2 text-slate-400">
+                        {url.startsWith('udp:')
+                          ? 'UDP tracker'
+                          : url.startsWith('wss:')
+                          ? 'WebSocket tracker'
+                          : 'HTTP tracker'}
+                      </td>
+                      <td className="px-3 py-2 font-bold text-cyber-green">Managed by librqbit</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

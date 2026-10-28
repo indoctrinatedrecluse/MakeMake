@@ -4,28 +4,39 @@ interface PeerNode {
   id: string;
   angle: number;
   distance: number;
-  speed: number;
-  country: string;
-  isSeed: boolean;
   pulsePhase: number;
 }
 
-export const SwarmAstrolabe: React.FC<{ activeTorrentName?: string }> = ({ activeTorrentName }) => {
+/** Never plot more blips than the astrolabe can legibly show. */
+const MAX_PLOTTED_PEERS = 40;
+
+/**
+ * Build the radar blips from the *real* connected peer count. Positions are
+ * deterministic (golden-angle spiral) so the display does not jitter, and no
+ * per-peer data is invented: every blip is one live connection reported by the
+ * engine.
+ */
+const buildPeers = (count: number): PeerNode[] =>
+  Array.from({ length: Math.max(0, Math.min(count, MAX_PLOTTED_PEERS)) }, (_, i) => ({
+    id: `PEER_${(i + 1).toString().padStart(2, '0')}`,
+    angle: ((i * 137.508) % 360) * (Math.PI / 180),
+    distance: 0.22 + (((i * 0.61803398875) % 1) * 0.7),
+    pulsePhase: (i * Math.PI) / 5,
+  }));
+
+export const SwarmAstrolabe: React.FC<{
+  activeTorrentName?: string;
+  activePeers?: number;
+}> = ({ activeTorrentName, activePeers = 0 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [hoveredPeer, setHoveredPeer] = useState<PeerNode | null>(null);
 
-  // Generate celestial peer constellation
-  const peersRef = useRef<PeerNode[]>(
-    Array.from({ length: 32 }, (_, i) => ({
-      id: `PEER_${Math.random().toString(36).substring(2, 7).toUpperCase()}`,
-      angle: Math.random() * Math.PI * 2,
-      distance: 0.2 + Math.random() * 0.72,
-      speed: Math.floor(Math.random() * 850) + 50,
-      country: ['CL', 'NZ', 'PF', 'US', 'JP', 'DE', 'IS', 'AU', 'SG', 'BR'][i % 10],
-      isSeed: i % 3 === 0,
-      pulsePhase: Math.random() * Math.PI * 2,
-    }))
-  );
+  // Celestial peer constellation driven by live librqbit peer counters.
+  const peersRef = useRef<PeerNode[]>(buildPeers(activePeers));
+
+  useEffect(() => {
+    peersRef.current = buildPeers(activePeers);
+  }, [activePeers]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -107,16 +118,16 @@ export const SwarmAstrolabe: React.FC<{ activeTorrentName?: string }> = ({ activ
         const midX = (centerX + x) / 2 + Math.sin(peer.pulsePhase) * 10;
         const midY = (centerY + y) / 2 + Math.cos(peer.pulsePhase) * 10;
         ctx.quadraticCurveTo(midX, midY, x, y);
-        ctx.strokeStyle = peer.isSeed ? 'rgba(0, 240, 255, 0.2)' : 'rgba(255, 208, 0, 0.15)';
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.18)';
         ctx.lineWidth = 0.8;
         ctx.stroke();
 
         // Node Glow
         const pulse = 2 + Math.sin(peer.pulsePhase) * 1.5;
         ctx.beginPath();
-        ctx.arc(x, y, pulse + (peer.isSeed ? 2 : 1), 0, Math.PI * 2);
-        ctx.fillStyle = peer.isSeed ? '#00f0ff' : '#ffd000';
-        ctx.shadowColor = peer.isSeed ? '#00f0ff' : '#ffd000';
+        ctx.arc(x, y, pulse + 1, 0, Math.PI * 2);
+        ctx.fillStyle = '#00f0ff';
+        ctx.shadowColor = '#00f0ff';
         ctx.shadowBlur = 8;
         ctx.fill();
         ctx.shadowBlur = 0;
@@ -177,15 +188,22 @@ export const SwarmAstrolabe: React.FC<{ activeTorrentName?: string }> = ({ activ
       {/* Live Telemetry Footer */}
       <div className="w-full mt-2 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] font-mono text-slate-400">
         <div>
-          ACTIVE PEERS: <span className="text-cyber-cyan font-bold">32 NODES</span>
+          ACTIVE PEERS:{' '}
+          <span className="text-cyber-cyan font-bold">
+            {activePeers} {activePeers === 1 ? 'NODE' : 'NODES'}
+          </span>
         </div>
         {hoveredPeer ? (
           <div className="text-cyber-gold font-bold">
-            [{hoveredPeer.country}] {hoveredPeer.id} : {hoveredPeer.speed} KB/s
+            {hoveredPeer.id} : CONNECTED
           </div>
         ) : (
           <div className="text-slate-400 truncate max-w-[130px]">
-            {activeTorrentName ? activeTorrentName.slice(0, 16) + '...' : 'RADAR LOCK: OK'}
+            {activeTorrentName
+              ? activeTorrentName.slice(0, 16) + '...'
+              : activePeers > 0
+              ? 'RADAR LOCK: OK'
+              : 'STANDBY // NO PEERS'}
           </div>
         )}
       </div>

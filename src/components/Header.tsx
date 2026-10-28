@@ -8,6 +8,8 @@ import {
   Sparkles,
   Radio,
   Share2,
+  PauseCircle,
+  PlayCircle,
 } from 'lucide-react';
 import { SystemStats } from '../types/torrent';
 
@@ -16,6 +18,9 @@ interface HeaderProps {
   onOpenAddModal: (initial?: { type: 'magnet' | 'file'; data: string; name?: string }) => void;
   onOpenSettings: () => void;
   onShowSplash: () => void;
+  onPauseAll?: () => void;
+  onResumeAll?: () => void;
+  torrentCount?: number;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -23,6 +28,9 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAddModal,
   onOpenSettings,
   onShowSplash,
+  onPauseAll,
+  onResumeAll,
+  torrentCount = 0,
 }) => {
   return (
     <header className="h-16 px-5 border-b border-cyber-cyan/20 bg-obsidian-950/90 backdrop-blur-md flex items-center justify-between select-none z-30">
@@ -77,18 +85,31 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right Controls */}
       <div className="flex items-center space-x-2.5">
+        {/* Global transfer controls */}
+        <div className="hidden sm:flex items-center bg-obsidian-900 rounded border border-slate-800 p-0.5">
+          <button
+            onClick={onPauseAll}
+            disabled={torrentCount === 0}
+            className="p-1.5 rounded text-slate-400 hover:text-cyber-red hover:bg-slate-800 disabled:opacity-30 transition-colors"
+            title="Pause all torrents"
+          >
+            <PauseCircle className="w-4 h-4" />
+          </button>
+          <button
+            onClick={onResumeAll}
+            disabled={torrentCount === 0}
+            className="p-1.5 rounded text-slate-400 hover:text-cyber-green hover:bg-slate-800 disabled:opacity-30 transition-colors"
+            title="Resume all torrents"
+          >
+            <PlayCircle className="w-4 h-4" />
+          </button>
+        </div>
+
         {/* Add Magnet Link Quick Trigger */}
         <button
-          onClick={() => {
-            const pasted = prompt('Enter or Paste Magnet URI:');
-            if (pasted && pasted.startsWith('magnet:?')) {
-              onOpenAddModal({ type: 'magnet', data: pasted });
-            } else if (pasted) {
-              alert('Please enter a valid magnet:? URI');
-            }
-          }}
+          onClick={() => onOpenAddModal()}
           className="px-3 py-1.5 rounded bg-obsidian-900 border border-cyber-cyan/30 text-cyber-cyan hover:bg-cyber-cyan/20 text-xs font-mono flex items-center space-x-1.5 transition-all shadow-glow-cyan/20"
-          title="Paste Magnet Link"
+          title="Add a magnet link"
         >
           <Link className="w-3.5 h-3.5" />
           <span className="hidden sm:inline">Magnet</span>
