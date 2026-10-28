@@ -3,6 +3,7 @@ mod engine;
 mod models;
 
 use engine::TorrentEngine;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -26,12 +27,16 @@ pub fn run() {
             commands::get_system_stats,
         ])
         .setup(|app| {
-            if cfg!(debug_assertions) {
+            #[cfg(debug_assertions)]
+            {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
+                        .level(log::LevelFilter::Debug)
                         .build(),
                 )?;
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.open_devtools();
+                }
             }
             Ok(())
         })

@@ -11,13 +11,17 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "MakeMake // Rapa Nui Cyberpunk Swarm Engine",
         "width": 1340,
         "height": 900,
         "minWidth": 1024,
         "minHeight": 700,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "visible": true,
+        "center": true,
+        "devtools": true
       }
     ],
     "security": {

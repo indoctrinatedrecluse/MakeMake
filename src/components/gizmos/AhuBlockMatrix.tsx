@@ -8,11 +8,12 @@ interface AhuBlockMatrixProps {
 }
 
 export const AhuBlockMatrix: React.FC<AhuBlockMatrixProps> = ({
-  piecesBitfield,
+  piecesBitfield = [],
   pieceCount = 64,
-  totalSize,
-  torrentName,
+  totalSize = 0,
+  torrentName = '',
 }) => {
+  const bitfield = Array.isArray(piecesBitfield) ? piecesBitfield : [];
   const pieceSize = pieceCount > 0 ? Math.round(totalSize / pieceCount) : 0;
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 B';
@@ -22,7 +23,7 @@ export const AhuBlockMatrix: React.FC<AhuBlockMatrixProps> = ({
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
   };
 
-  const completedCount = piecesBitfield.filter((b) => b === 1).length;
+  const completedCount = bitfield.filter((b) => b === 1).length;
   const percent = pieceCount > 0 ? Math.round((completedCount / pieceCount) * 100) : 0;
 
   return (
@@ -41,7 +42,7 @@ export const AhuBlockMatrix: React.FC<AhuBlockMatrixProps> = ({
       {/* Matrix Grid */}
       <div className="grid grid-cols-16 gap-1 p-2 bg-obsidian-950/80 rounded border border-slate-800/80 max-h-[140px] overflow-y-auto">
         {Array.from({ length: pieceCount }, (_, i) => {
-          const isDone = piecesBitfield[i] === 1;
+          const isDone = bitfield[i] === 1;
           const isCurrentTarget = !isDone && i === completedCount;
           return (
             <div
