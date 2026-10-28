@@ -173,74 +173,87 @@ impl TorrentEngine {
         let torrents_clone = self.torrents.clone();
         let settings_clone = self.settings.clone();
 
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
-            loop {
-                interval.tick().await;
-                let now = chrono::Utc::now().timestamp_millis();
-                let settings = settings_clone.read().await.clone();
-                let mut torrents = torrents_clone.write().await;
+        std::thread::Builder::new()
+            .name("makemake-engine-worker".to_string())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("Failed to initialize Tokio runtime for MakeMake engine: {}", e);
+                        return;
+                    }
+                };
 
-                for t in torrents.iter_mut() {
-                    if t.status == "Downloading" {
-                        // Fluctuate speed slightly
-                        let jitter = ((now % 997) as i64 - 500) * 1200;
-                        let speed = (t.download_speed as i64 + jitter).clamp(2_500_000, 25_000_000) as u64;
-                        t.download_speed = speed;
-                        t.upload_speed = ((speed / 6) as i64 + jitter / 4).clamp(300_000, 3_000_000) as u64;
+                rt.block_on(async move {
+                    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+                    loop {
+                        interval.tick().await;
+                        let now = chrono::Utc::now().timestamp_millis();
+                        let settings = settings_clone.read().await.clone();
+                        let mut torrents = torrents_clone.write().await;
 
-                        t.downloaded_bytes = (t.downloaded_bytes + t.download_speed).min(t.total_bytes);
-                        t.progress = ((t.downloaded_bytes as f64 / t.total_bytes as f64) * 100.0) as f32;
+                        for t in torrents.iter_mut() {
+                            if t.status == "Downloading" {
+                                // Fluctuate speed slightly
+                                let jitter = ((now % 997) as i64 - 500) * 1200;
+                                let speed = (t.download_speed as i64 + jitter).clamp(2_500_000, 25_000_000) as u64;
+                                t.download_speed = speed;
+                                t.upload_speed = ((speed / 6) as i64 + jitter / 4).clamp(300_000, 3_000_000) as u64;
 
-                        let remaining = t.total_bytes.saturating_sub(t.downloaded_bytes);
-                        t.eta_seconds = if t.download_speed > 0 {
-                            Some((remaining / t.download_speed) as i64)
-                        } else {
-                            None
-                        };
+                                t.downloaded_bytes = (t.downloaded_bytes + t.download_speed).min(t.total_bytes);
+                                t.progress = ((t.downloaded_bytes as f64 / t.total_bytes as f64) * 100.0) as f32;
 
-                        let pc = t.piece_count.max(1);
-                        t.pieces_completed = ((t.downloaded_bytes as f64 / t.total_bytes as f64) * pc as f64) as usize;
-                        t.pieces_bitfield = (0..pc)
-                            .map(|i| if i < t.pieces_completed { 1 } else { 0 })
-                            .collect();
+                                let remaining = t.total_bytes.saturating_sub(t.downloaded_bytes);
+                                t.eta_seconds = if t.download_speed > 0 {
+                                    Some((remaining / t.download_speed) as i64)
+                                } else {
+                                    None
+                                };
 
-                        // Completion trigger
-                        if t.progress >= 100.0 {
-                            t.status = "Seeding".to_string();
-                            t.progress = 100.0;
-                            t.download_speed = 0;
-                            t.eta_seconds = Some(0);
-                            t.completed_at = Some(now);
+                                let pc = t.piece_count.max(1);
+                                t.pieces_completed = ((t.downloaded_bytes as f64 / t.total_bytes as f64) * pc as f64) as usize;
+                                t.pieces_bitfield = (0..pc)
+                                    .map(|i| if i < t.pieces_completed { 1 } else { 0 })
+                                    .collect();
 
-                            // Auto-move .torrent file on completion if enabled
-                            if settings.move_completed_torrent_enabled && !settings.completed_torrent_dir.is_empty() {
-                                let _ = fs::create_dir_all(&settings.completed_torrent_dir);
-                                let dest = Path::new(&settings.completed_torrent_dir).join(format!("{}.torrent", t.name));
-                                let _ = fs::write(&dest, format!("d8:announce31:http://tracker.makemake.sw:69694:infod4:name{}:{}12:piece lengthi262144e6:pieces20:{}ee", t.name.len(), t.name, t.info_hash));
-                                t.backed_up = true;
-                                t.backup_path = Some(dest.to_string_lossy().to_string());
+                                // Completion trigger
+                                if t.progress >= 100.0 {
+                                    t.status = "Seeding".to_string();
+                                    t.progress = 100.0;
+                                    t.download_speed = 0;
+                                    t.eta_seconds = Some(0);
+                                    t.completed_at = Some(now);
+
+                                    // Auto-move .torrent file on completion if enabled
+                                    if settings.move_completed_torrent_enabled && !settings.completed_torrent_dir.is_empty() {
+                                        let _ = fs::create_dir_all(&settings.completed_torrent_dir);
+                                        let dest = Path::new(&settings.completed_torrent_dir).join(format!("{}.torrent", t.name));
+                                        let _ = fs::write(&dest, format!("d8:announce31:http://tracker.makemake.sw:69694:infod4:name{}:{}12:piece lengthi262144e6:pieces20:{}ee", t.name.len(), t.name, t.info_hash));
+                                        t.backed_up = true;
+                                        t.backup_path = Some(dest.to_string_lossy().to_string());
+                                    }
+                                }
+                            } else if t.status == "Seeding" {
+                                t.upload_speed = (1_200_000 + ((now % 500) * 1000)) as u64;
+                                t.uploaded_bytes += t.upload_speed;
+                            }
+
+                            // Temporal Auto-Backup check
+                            if settings.auto_backup_enabled && !t.backed_up && !settings.backup_dir.is_empty() {
+                                let age_hours = (now - t.created_at) as f64 / 3_600_000.0;
+                                if settings.backup_interval_hours == 0 || age_hours >= settings.backup_interval_hours as f64 {
+                                    let _ = fs::create_dir_all(&settings.backup_dir);
+                                    let dest = Path::new(&settings.backup_dir).join(format!("{}.torrent", t.name));
+                                    let _ = fs::write(&dest, format!("d8:announce31:http://tracker.makemake.sw:69694:infod4:name{}:{}12:piece lengthi262144e6:pieces20:{}ee", t.name.len(), t.name, t.info_hash));
+                                    t.backed_up = true;
+                                    t.backup_path = Some(dest.to_string_lossy().to_string());
+                                }
                             }
                         }
-                    } else if t.status == "Seeding" {
-                        t.upload_speed = (1_200_000 + ((now % 500) * 1000)) as u64;
-                        t.uploaded_bytes += t.upload_speed;
                     }
-
-                    // Temporal Auto-Backup check
-                    if settings.auto_backup_enabled && !t.backed_up && !settings.backup_dir.is_empty() {
-                        let age_hours = (now - t.created_at) as f64 / 3_600_000.0;
-                        if settings.backup_interval_hours == 0 || age_hours >= settings.backup_interval_hours as f64 {
-                            let _ = fs::create_dir_all(&settings.backup_dir);
-                            let dest = Path::new(&settings.backup_dir).join(format!("{}.torrent", t.name));
-                            let _ = fs::write(&dest, format!("d8:announce31:http://tracker.makemake.sw:69694:infod4:name{}:{}12:piece lengthi262144e6:pieces20:{}ee", t.name.len(), t.name, t.info_hash));
-                            t.backed_up = true;
-                            t.backup_path = Some(dest.to_string_lossy().to_string());
-                        }
-                    }
-                }
-            }
-        });
+                });
+            })
+            .expect("Failed to spawn MakeMake engine worker thread");
     }
 
     pub async fn get_torrents(&self) -> Vec<TorrentItem> {

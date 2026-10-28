@@ -115,6 +115,13 @@ if ($Mode -eq 'Desktop') {
     # Start-Process detached so closing the PowerShell console does not terminate the app
     $Proc = Start-Process -FilePath $BinaryPath -WorkingDirectory $ProjectRoot -PassThru
 
+    # Allow a brief moment for the window to initialize and verify process health
+    Start-Sleep -Milliseconds 800
+    if ($Proc.HasExited) {
+        Write-Error "MakeMake process exited unexpectedly with ExitCode $($Proc.ExitCode). Please run in debug mode to inspect output."
+        exit 1
+    }
+
     Write-Host ""
     Write-Host "[OK] SUCCESS: MakeMake Desktop is running independently!" -ForegroundColor Green
     Write-Host "Process ID (PID) : $($Proc.Id)" -ForegroundColor DarkCyan
