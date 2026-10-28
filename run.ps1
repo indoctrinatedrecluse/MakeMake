@@ -42,16 +42,14 @@ $ErrorActionPreference = 'Stop'
 
 function Show-Banner {
     Write-Host @"
-`e[38;2;0;240;255m
    .---.
   /     \      MAKEMAKE PROTOCOL // RAPA NUI SWARM ENGINE
- | () () |     AHU-ONLINE • TANGATA-MANU DAEMON
+ | () () |     AHU-ONLINE // TANGATA-MANU DAEMON
   \  ^  /      Target Mode: $Mode $(if ($Release) { '[RELEASE]' } else { '[DEBUG]' })
    |||||
   /=====\
  /       \
-`e[0m
-"@
+"@ -ForegroundColor Cyan
 }
 
 if ($Help) {
@@ -64,7 +62,7 @@ $ProjectRoot = $PSScriptRoot
 Set-Location $ProjectRoot
 
 # 1. Dependency Pre-flight Check
-Write-Host "`e[38;2;255;208;0m[1/3] Verifying environment & dependencies...`e[0m"
+Write-Host "[1/3] Verifying environment & dependencies..." -ForegroundColor Yellow
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     Write-Error "Node.js was not found in PATH. Please install Node.js (v18+)."
@@ -83,11 +81,11 @@ if (-not (Test-Path "$ProjectRoot\node_modules")) {
 
 # 2. Build Pipeline
 if (-not $SkipBuild) {
-    Write-Host "`e[38;2;0;240;255m[2/3] Building frontend assets (Vite + TypeScript)...`e[0m"
+    Write-Host "[2/3] Building frontend assets (Vite + TypeScript)..." -ForegroundColor Cyan
     npm run build
 
     if ($Mode -eq 'Desktop') {
-        Write-Host "`e[38;2;0;240;255m[2/3] Compiling Tauri v2 Rust backend...`e[0m"
+        Write-Host "[2/3] Compiling Tauri v2 Rust backend..." -ForegroundColor Cyan
         $CargoArgs = @('build', '--manifest-path', "$ProjectRoot\src-tauri\Cargo.toml")
         if ($Release) {
             $CargoArgs += '--release'
@@ -99,11 +97,11 @@ if (-not $SkipBuild) {
         }
     }
 } else {
-    Write-Host "`e[38;2;16;255;160m[2/3] Skipping build step as requested (-SkipBuild).`e[0m"
+    Write-Host "[2/3] Skipping build step as requested (-SkipBuild)." -ForegroundColor Green
 }
 
 # 3. Independent Detached Execution
-Write-Host "`e[38;2;255;42;109m[3/3] Engaging swarm process (Detached mode)...`e[0m"
+Write-Host "[3/3] Engaging swarm process (Detached mode)..." -ForegroundColor Magenta
 
 if ($Mode -eq 'Desktop') {
     $TargetSubdir = if ($Release) { 'release' } else { 'debug' }
@@ -117,10 +115,12 @@ if ($Mode -eq 'Desktop') {
     # Start-Process detached so closing the PowerShell console does not terminate the app
     $Proc = Start-Process -FilePath $BinaryPath -WorkingDirectory $ProjectRoot -PassThru
 
-    Write-Host "`e[38;2;16;255;160m`n✔ SUCCESS: MakeMake Desktop is running independently!`e[0m"
+    Write-Host ""
+    Write-Host "[OK] SUCCESS: MakeMake Desktop is running independently!" -ForegroundColor Green
     Write-Host "Process ID (PID) : $($Proc.Id)" -ForegroundColor DarkCyan
     Write-Host "Binary Location  : $BinaryPath" -ForegroundColor DarkGray
-    Write-Host "`e[38;2;0;240;255mYou can now safely close this terminal window without interrupting MakeMake.`e[0m`n"
+    Write-Host "You can now safely close this terminal window without interrupting MakeMake." -ForegroundColor Cyan
+    Write-Host ""
 }
 else {
     # Web Mode: Start background Vite dev server detached
@@ -130,8 +130,10 @@ else {
     Start-Sleep -Seconds 2
     Start-Process $Url
 
-    Write-Host "`e[38;2;16;255;160m`n✔ SUCCESS: MakeMake Web Preview is running in the background!`e[0m"
+    Write-Host ""
+    Write-Host "[OK] SUCCESS: MakeMake Web Preview is running in the background!" -ForegroundColor Green
     Write-Host "Process ID (PID) : $($Proc.Id)" -ForegroundColor DarkCyan
     Write-Host "URL              : $Url" -ForegroundColor Cyan
-    Write-Host "`e[38;2;0;240;255mYou can now safely close this terminal window without interrupting the server.`e[0m`n"
+    Write-Host "You can now safely close this terminal window without interrupting the server." -ForegroundColor Cyan
+    Write-Host ""
 }
