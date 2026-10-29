@@ -107,50 +107,93 @@ export const App: React.FC = () => {
 
   // Sync state from Tauri backend / dev engine
   const restoreAnnouncedRef = useRef(false);
+  // Which torrent the drawer shows. Kept in a ref so the poll never depends on the
+  // selection: that dependency used to re-create the polling effect on every tick, which
+  // turned the 1 s interval into an unbounded loop of IPC calls.
+  const selectedIdRef = useRef<string | null>(null);
+  // Is anything actually moving? Drives the adaptive poll interval.
+  const busyRef = useRef(false);
+
   const refreshData = useCallback(async () => {
     try {
-      const [torrentList, sysStats] = await Promise.all([
-        TauriBridge.getTorrents(),
-        TauriBridge.getSystemStats(),
-      ]);
-      setTorrents(torrentList);
-      setStats(sysStats);
+      const snapshot = await TauriBridge.getSnapshot();
+      setTorrents(snapshot.torrents);
+      setStats(snapshot.stats);
+
+      busyRef.current = snapshot.torrents.some(
+        (t) =>
+          t.resolving === true ||
+          t.status === 'Downloading' ||
+          t.status === 'Checking' ||
+          t.status === 'Queued',
+      );
 
       // Announce a recovered session exactly once per launch.
-      if (!restoreAnnouncedRef.current && sysStats.restoredTorrents > 0) {
+      if (!restoreAnnouncedRef.current && snapshot.stats.restoredTorrents > 0) {
         restoreAnnouncedRef.current = true;
-        const resumed = sysStats.resumedTorrents;
+        const resumed = snapshot.stats.resumedTorrents;
         showToast(
           resumed > 0
-            ? `Session recovered: ${sysStats.restoredTorrents} swarm${sysStats.restoredTorrents === 1 ? '' : 's'} restored · ${resumed} re-armed`
-            : `Session recovered: ${sysStats.restoredTorrents} swarm${sysStats.restoredTorrents === 1 ? '' : 's'} restored in dormant state (auto-resume off)`,
+            ? `Session recovered: ${snapshot.stats.restoredTorrents} swarm${snapshot.stats.restoredTorrents === 1 ? '' : 's'} restored · ${resumed} re-armed`
+            : `Session recovered: ${snapshot.stats.restoredTorrents} swarm${snapshot.stats.restoredTorrents === 1 ? '' : 's'} restored in dormant state (auto-resume off)`,
         );
-      }
-
-      // Keep selectedTorrent updated with latest piece/speed changes
-      if (selectedTorrent) {
-        const updated = torrentList.find((t) => t.id === selectedTorrent.id);
-        if (updated) setSelectedTorrent(updated);
-      } else if (torrentList.length > 0) {
-        setSelectedTorrent(torrentList[0]);
       }
     } catch (e) {
       console.warn('Error refreshing MakeMake state', e);
     }
-  }, [selectedTorrent, showToast]);
+  }, [showToast]);
+
+  // Keep the open drawer pointing at the freshest copy of the selected torrent.
+  useEffect(() => {
+    const selectedId = selectedIdRef.current;
+    if (!selectedId) {
+      if (torrents.length > 0) {
+        selectedIdRef.current = torrents[0].id;
+        setSelectedTorrent(torrents[0]);
+      }
+      return;
+    }
+
+    const updated = torrents.find((t) => t.id === selectedId);
+    if (updated) {
+      setSelectedTorrent(updated);
+    } else {
+      selectedIdRef.current = null;
+      setSelectedTorrent(null);
+    }
+  }, [torrents]);
 
   useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+
     TauriBridge.getSettings()
       .then((s) => {
+        if (cancelled) return;
         setSettings(s);
         setSoundEnabled(s.enableSoundFx);
         cyberAudio.enabled = s.enableSoundFx;
       })
       .catch(console.warn);
 
-    refreshData();
-    const interval = setInterval(refreshData, 1000);
-    return () => clearInterval(interval);
+    // Adaptive poll: once a second while something is transferring or resolving, every
+    // three seconds when the queue is idle, and barely at all while the window is hidden.
+    const tick = async () => {
+      if (cancelled) return;
+      const hidden = document.visibilityState === 'hidden';
+      if (!hidden) {
+        await refreshData();
+      }
+      if (cancelled) return;
+      timer = window.setTimeout(tick, hidden ? 5000 : busyRef.current ? 1000 : 3000);
+    };
+
+    void tick();
+
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [refreshData]);
 
   // Handle Drag and Drop for .torrent files
@@ -360,6 +403,7 @@ export const App: React.FC = () => {
 
   const handleEditFiles = (torrent: TorrentItem) => {
     cyberAudio.playClick();
+    selectedIdRef.current = torrent.id;
     setSelectedTorrent(torrent);
     setDrawerTab('files');
     setIsDrawerOpen(true);
@@ -433,9 +477,12 @@ export const App: React.FC = () => {
     setIsAddModalOpen(false);
     try {
       const item = await TauriBridge.addTorrent(preview, targetDir);
+      selectedIdRef.current = item.id;
       setSelectedTorrent(item);
       setInitialAddPayload(null);
-      showToast(`Swarm engaged: ${item.name}`);
+      showToast(
+        item.resolving ? `Queued swarm: ${item.name} — resolving metadata…` : `Swarm engaged: ${item.name}`,
+      );
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
     }
@@ -464,7 +511,10 @@ export const App: React.FC = () => {
 
   const counts = {
     all: torrents.length,
-    active: torrents.filter((t) => t.status === 'Downloading' || t.status === 'Seeding').length,
+    active: torrents.filter(
+      (t) =>
+        t.resolving === true || t.status === 'Downloading' || t.status === 'Seeding',
+    ).length,
     completed: torrents.filter((t) => t.status === 'Seeding' || t.progress >= 100).length,
     paused: torrents.filter((t) => t.status === 'Paused').length,
     backedUp: torrents.filter((t) => t.backedUp).length,
@@ -540,6 +590,7 @@ export const App: React.FC = () => {
             viewMode={viewMode}
             selectedTorrent={selectedTorrent}
             onSelectTorrent={(t) => {
+              selectedIdRef.current = t.id;
               setSelectedTorrent(t);
             }}
             onContextMenu={(e, t) => {

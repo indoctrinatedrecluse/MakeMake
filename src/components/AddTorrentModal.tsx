@@ -338,7 +338,8 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
                 RESOLVING SWARM METADATA FROM DHT...
               </div>
               <div className="text-[11px] font-mono text-slate-400 mt-1">
-                Interrogating the Rapa Nui peer routing table — this can take up to 45 seconds
+                Interrogating the Rapa Nui peer routing table — up to 20 seconds. If the swarm is
+                slow the torrent is still queued and resolves in the background.
               </div>
             </div>
           </div>

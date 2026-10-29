@@ -1,6 +1,6 @@
 [package]
 name = "makemake"
-version = "0.1.2"
+version = "0.1.3"
 description = "MakeMake // Rapa Nui Cyberpunk BitTorrent Engine"
 authors = ["Abhishek Mitra (indoctrinatedrecluse)"]
 license = "Apache-2.0"
@@ -33,3 +33,12 @@ log = "0.4"
 # Real BitTorrent engine (DHT, trackers, peer wire protocol, piece verification).
 librqbit = "9.0.1"
 base64 = "0.22"
+
+# Windows sparse-file support for payload pre-creation (see `src/sparse.rs`).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+

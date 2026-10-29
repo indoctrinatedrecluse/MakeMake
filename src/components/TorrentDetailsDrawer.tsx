@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   X,
   Maximize2,
@@ -27,6 +27,9 @@ import { cyberAudio } from '../utils/cyberAudio';
 import { TauriBridge } from '../api/tauriBridge';
 
 export type DetailTab = 'overview' | 'graph' | 'peers' | 'files' | 'pieces' | 'trackers';
+
+// How many file rows are rendered at once (the rest is behind "show more").
+const FILES_PAGE = 200;
 
 interface TorrentDetailsDrawerProps {
   torrent: TorrentItem;
@@ -64,10 +67,28 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
     if (activeTabProp) setActiveTab(activeTabProp);
   }, [activeTabProp]);
 
-  const selectionSignature = torrent.files.map((f) => (f.selected ? '1' : '0')).join('');
+  // File lists can hold tens of thousands of entries; only ever render a window of them and
+  // fold the rest behind "show more". Building the signature below from the whole list (as
+  // this used to) allocated a string the size of the file count on every single render.
+  const files = useMemo(() => torrent.files ?? [], [torrent.files]);
+  const [visibleFiles, setVisibleFiles] = useState(FILES_PAGE);
+  const shownFiles = useMemo(() => files.slice(0, visibleFiles), [files, visibleFiles]);
 
   useEffect(() => {
-    setSelection(new Set(torrent.files.filter((f) => f.selected).map((f) => f.index)));
+    setVisibleFiles(FILES_PAGE);
+  }, [torrent.id]);
+
+  const selectionSignature = useMemo(() => {
+    if (files.length === 0) return '0';
+    let selected = 0;
+    files.forEach((f) => {
+      if (f.selected) selected += 1;
+    });
+    return `${files.length}:${selected}`;
+  }, [files]);
+
+  useEffect(() => {
+    setSelection(new Set(files.filter((f) => f.selected).map((f) => f.index)));
     setSelectionDirty(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [torrent.id, selectionSignature]);
@@ -480,7 +501,7 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                   </tr>
                 </thead>
               <tbody className="divide-y divide-slate-800/60 bg-obsidian-950/80">
-                {torrent.files.map((file: TorrentFileItem) => {
+                {shownFiles.map((file: TorrentFileItem) => {
                   const downloadedForFile = torrent.fileProgress?.[file.index];
                   const fileProgress =
                     downloadedForFile !== undefined && file.length > 0
@@ -549,6 +570,19 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                   </tr>
                   );
                 })}
+                {files.length > shownFiles.length && (
+                  <tr>
+                    <td colSpan={7} className="px-3 py-2 text-center">
+                      <button
+                        onClick={() => setVisibleFiles((current) => current + FILES_PAGE)}
+                        className="text-[11px] font-mono text-cyber-cyan hover:underline"
+                      >
+                        Show {Math.min(FILES_PAGE, files.length - shownFiles.length)} more of{' '}
+                        {files.length.toLocaleString()} files
+                      </button>
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
             </div>

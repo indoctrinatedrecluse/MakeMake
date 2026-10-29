@@ -29,7 +29,15 @@ export interface TorrentItem {
   downloadSpeed: number; // bytes/sec
   uploadSpeed: number; // bytes/sec
   progress: number; // 0 to 100
-  status: 'Downloading' | 'Seeding' | 'Paused' | 'Checking' | 'Queued' | 'Completed' | 'Error';
+  status:
+    | 'Downloading'
+    | 'Seeding'
+    | 'Paused'
+    | 'Checking'
+    | 'Queued'
+    | 'Resolving'
+    | 'Completed'
+    | 'Error';
   peersConnected: number;
   peersTotal: number;
   seedsConnected: number;
@@ -49,6 +57,8 @@ export interface TorrentItem {
   rawTorrentBase64?: string;
   priority: 'High' | 'Normal' | 'Low';
   error?: string | null;
+  /** True while the torrent is a queued magnet that has not resolved its metadata yet. */
+  resolving?: boolean;
 }
 
 export interface PeerDetail {
@@ -83,6 +93,11 @@ export interface ClientSettings {
   theme: 'cyber-obsidian' | 'neon-caldera' | 'solar-birdman';
   /** Re-arm the swarms that were running when the app was last closed. */
   resumeOnLaunch: boolean;
+}
+
+export interface TorrentSnapshot {
+  torrents: TorrentItem[];
+  stats: SystemStats;
 }
 
 export interface SystemStats {

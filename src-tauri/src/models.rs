@@ -59,6 +59,18 @@ pub struct TorrentItem {
     pub priority: String,
     /// Last error reported by librqbit for this torrent, if any.
     pub error: Option<String>,
+    /// True while the torrent is only queued (a magnet that has not resolved its metadata
+    /// yet). Such an item has no librqbit handle behind it.
+    #[serde(default)]
+    pub resolving: bool,
+}
+
+/// One UI poll: the whole queue plus the global counters, in a single round trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentSnapshot {
+    pub torrents: Vec<TorrentItem>,
+    pub stats: SystemStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,7 +152,7 @@ pub struct BackupResult {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStats {
     pub global_download_speed: u64,

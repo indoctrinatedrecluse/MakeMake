@@ -1,8 +1,11 @@
 mod commands;
 mod engine;
 mod models;
+mod sparse;
+
 
 use std::time::Duration;
+
 
 use engine::TorrentEngine;
 use tauri::Manager;
@@ -22,6 +25,8 @@ pub fn run() {
         .manage(engine)
         .invoke_handler(tauri::generate_handler![
             commands::get_torrents,
+            commands::get_snapshot,
+            commands::retry_pending,
             commands::get_settings,
             commands::update_settings,
             commands::start_torrent,

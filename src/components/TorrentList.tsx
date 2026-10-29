@@ -53,7 +53,9 @@ export const TorrentList: React.FC<TorrentListProps> = ({
 
     switch (filter) {
       case 'active':
-        return t.status === 'Downloading' || t.status === 'Seeding';
+        return (
+          t.resolving === true || t.status === 'Downloading' || t.status === 'Seeding'
+        );
       case 'completed':
         return t.status === 'Seeding' || t.progress >= 100;
       case 'paused':

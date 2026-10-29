@@ -67,12 +67,19 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
         return 'text-slate-400 bg-slate-800 border-slate-700';
       case 'Checking':
         return 'text-cyber-gold bg-cyber-gold/15 border-cyber-gold/40 animate-pulse';
+      case 'Resolving':
+        return 'text-cyber-gold bg-cyber-gold/15 border-cyber-gold/40 animate-pulse';
+      case 'Error':
+        return 'text-cyber-red bg-cyber-red/15 border-cyber-red/40';
       default:
         return 'text-slate-400 bg-slate-800 border-slate-700';
     }
   };
 
   const isPaused = torrent.status === 'Paused';
+  // A queued magnet has no librqbit handle yet: the button retries metadata resolution.
+  const isResolving = torrent.resolving === true;
+  const canStart = isPaused || isResolving;
 
   // Compact High-Density Table View Mode
   if (viewMode === 'table') {
@@ -175,16 +182,22 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
             onClick={(e) => {
               e.stopPropagation();
               cyberAudio.playClick();
-              if (isPaused) {
+              if (canStart) {
                 onStart(torrent.id);
               } else {
                 onPause(torrent.id);
               }
             }}
             className="p-1.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition-colors border border-slate-700"
-            title={isPaused ? 'Awaken Monolith (Start)' : 'Dormant State (Pause)'}
+            title={
+              isResolving
+                ? 'Retry metadata resolution'
+                : isPaused
+                  ? 'Awaken Monolith (Start)'
+                  : 'Dormant State (Pause)'
+            }
           >
-            {isPaused ? <Play className="w-3.5 h-3.5 text-cyber-cyan" /> : <Pause className="w-3.5 h-3.5 text-cyber-red" />}
+            {canStart ? <Play className="w-3.5 h-3.5 text-cyber-cyan" /> : <Pause className="w-3.5 h-3.5 text-cyber-red" />}
           </button>
         </div>
       </div>

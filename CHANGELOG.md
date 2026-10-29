@@ -4,6 +4,69 @@ All notable changes to **MakeMake // Rapa Nui Cyberpunk BitTorrent Engine** are 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.3] — 2026-10-29
+
+Reliability release. A deep dive into the four symptoms — magnets that never reached the queue,
+large torrents that froze the machine while "allocating space", a details drawer that locked up on
+big torrents, and downloads that never started — turned up one root cause in librqbit, three in
+MakeMake itself, and a fourth that was a runaway UI loop.
+
+### Fixed
+- **Large torrents no longer consume their full size on disk the moment they are added.**
+  librqbit 9.0.1 tries to mark every payload file sparse before extending it, but its
+  `DeviceIoControl(FSCTL_SET_SPARSE)` call passes a NULL `lpBytesReturned` together with a NULL
+  `OVERLAPPED`, which Windows rejects. The sparse flag was therefore never applied and NTFS
+  allocated the whole torrent densely. Measured on a real 133 GiB / 34 073-piece torrent: adding a
+  single 66.76 GiB file reserved **66.76 GiB of free space within two seconds**, on a volume with
+  108 GB left — which is why the machine stalled while "allocating space" and why the download had
+  nowhere left to go. MakeMake now pre-creates the exact payload paths itself, empty and marked
+  sparse, before handing the torrent over (see `src-tauri/src/sparse.rs`).
+- **Adding a large torrent no longer re-hashes data it just created.** Because the payload is
+  created at zero length, librqbit's initial check finishes immediately instead of reading (and
+  SHA-1 hashing) the whole payload. The same 66.76 GiB file now initialises in ~2 s with 4 KB
+  actually used, instead of ~94 s of full-disk hashing.
+- **Magnets are queued instead of vanishing.** A magnet whose metadata had not arrived was awaited
+  inside the `add_torrent` command: the dialog closed, nothing appeared in the list, and if the
+  swarm was slow the add failed with nothing to show for it. Magnets are now registered as queue
+  entries with a `Resolving` status, resolve in the background (3 attempts, real name/size/file
+  list published as soon as the swarm answers), survive an app restart, and can be retried from
+  the row button instead of being re-added by hand.
+- **The 133 GiB "lag" was an unbounded polling loop.** `refreshData` depended on
+  `selectedTorrent`, and the polling effect depended on `refreshData`; every poll replaced the
+  selected object, re-created the callback, tore down and re-ran the effect, and fired another
+  pair of IPC calls. The window now polls a single `get_snapshot` command on an adaptive timer
+  (1 s active, 3 s idle, 5 s hidden) and keeps the selection in a ref.
+- **The engine no longer walks the torrent list twice per tick.** `get_system_stats` called the
+  whole `collect_items` pass (file metadata included) just to sum counters; it now reads librqbit
+  directly, and the list itself is served with cached metadata.
+- **Per-torrent metadata is cached.** `build_item` used to call `iter_file_details()` — one
+  `String` per path component — for every torrent on every poll. Metadata is immutable per info
+  hash, so it is snapshotted once.
+- **The piece matrix no longer renders one DOM node per piece.** A 34 000-piece torrent produced
+  34 000 divs re-laid out every second. It is now a canvas with a capped cell budget, and the
+  reported "verified" count comes from the bytes librqbit actually has instead of a rounded
+  progress estimate.
+- **Multi-file torrents get their own folder again.** MakeMake always passed an explicit
+  `output_folder`, which defeated librqbit's default sub-folder layout and dumped every payload
+  file straight into the chosen directory, where it collided with other torrents and with the
+  user's own files.
+- **The Files tab renders a window** (200 rows, "show more") instead of thousands of rows, and its
+  selection signature no longer allocates a string the size of the file list on every render.
+
+### Changed
+- `get_snapshot` (torrents + stats in one round trip) and `retry_pending` are new commands;
+  `get_torrents` and `get_system_stats` remain for compatibility.
+- Magnet metadata preview now gives up after 20 s (was 45 s) and says so, because the download no
+  longer depends on it — the queue picks up from there.
+
+### Added
+- `examples/torrent_probe.rs`: a diagnostic harness that adds a real `.torrent` or magnet to a
+  throw-away session and reports every half second what the engine is doing (state, checked bytes,
+  disk usage, peers, speed). It is how the allocation and hashing costs above were measured, and
+  it verifies that a download actually starts (`PROBE_LIVE=1`).
+- Tests for sparse pre-creation, payload path selection (padding files, partial selections),
+  queued-magnet items, the coarse piece map and the file-selection rules.
+
 ## [v0.1.2] — 2026-10-29
 
 Licensing release: MakeMake is open source under **Apache-2.0**, and the published installer now

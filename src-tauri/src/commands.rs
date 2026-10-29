@@ -4,11 +4,24 @@ use std::process::Command;
 use crate::engine::TorrentEngine;
 use crate::models::{
     BackupResult, ClientSettings, PeerDetail, SystemStats, TorrentItem, TorrentMetadataPreview,
+    TorrentSnapshot,
 };
 
 #[tauri::command]
 pub async fn get_torrents(engine: State<'_, TorrentEngine>) -> Result<Vec<TorrentItem>, String> {
     engine.get_torrents().await
+}
+
+/// Torrent queue + global counters in one call (what the window polls every second).
+#[tauri::command]
+pub async fn get_snapshot(engine: State<'_, TorrentEngine>) -> Result<TorrentSnapshot, String> {
+    engine.get_snapshot().await
+}
+
+/// Re-arm a queued magnet whose metadata resolution failed.
+#[tauri::command]
+pub async fn retry_pending(id: String, engine: State<'_, TorrentEngine>) -> Result<(), String> {
+    engine.retry_pending(&id).await
 }
 
 #[tauri::command]

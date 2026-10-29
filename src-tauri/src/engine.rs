@@ -5,6 +5,7 @@
 //! handled by librqbit. This module only translates between librqbit's live state and the
 //! `TorrentItem` model consumed by the React front-end.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::SocketAddr;
@@ -28,14 +29,32 @@ use tokio::sync::{Mutex, OnceCell, RwLock};
 
 use crate::models::{
     BackupResult, ClientSettings, PeerDetail, SystemStats, TorrentFileItem, TorrentItem,
-    TorrentMetadataPreview,
+    TorrentMetadataPreview, TorrentSnapshot,
 };
+use crate::sparse;
+
+/// How many buckets the coarse piece map reported to the UI has.
+///
+/// librqbit does not expose the real piece bitfield, and a torrent can have tens of
+/// thousands of pieces; the UI only ever draws a small matrix, so MakeMake sends a fixed
+/// number of buckets derived from verified bytes. Rendering one DOM node per piece is what
+/// made the details drawer freeze on large torrents.
+const COARSE_BUCKETS: usize = 64;
 
 /// File (inside the app config dir) storing UI settings + per-torrent bookkeeping.
 const STATE_FILE_NAME: &str = "makemake-state.json";
 
-/// How long we wait for DHT/tracker metadata when previewing a magnet link.
-const MAGNET_METADATA_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long the "inspect a magnet link" dialog waits for swarm metadata before it lets the
+/// user start the download anyway. The actual resolution then continues in the background
+/// (see [`TorrentEngine::resolve_pending`]) while the torrent is already in the queue.
+const MAGNET_METADATA_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long one background attempt to resolve a queued magnet may take.
+const PENDING_RESOLVE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How many times a queued magnet is retried before it is parked with an error.
+const PENDING_RESOLVE_ATTEMPTS: u32 = 3;
+
 
 /// Per-torrent data that librqbit does not track itself but the UI needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +106,148 @@ fn default_priority() -> String {
     "Normal".to_string()
 }
 
+/// Immutable metadata of a torrent, cached for the lifetime of the session.
+///
+/// librqbit keeps this behind an `Arc` and never mutates it, but the only way to read it is
+/// `with_metadata(|m| m.info.iter_file_details()...)`, which allocates a `String` per path
+/// component. Doing that for every torrent on every UI tick was the main reason a torrent
+/// with tens of thousands of files made the whole client crawl, so MakeMake snapshots it
+/// once per info hash instead.
+#[derive(Debug, Clone)]
+struct CachedMeta {
+    name: String,
+    piece_count: usize,
+    piece_length: u64,
+    total_bytes: u64,
+    files: Vec<TorrentFileItem>,
+}
+
+impl CachedMeta {
+    fn from_handle(handle: &Arc<ManagedTorrent>) -> Option<Self> {
+        handle
+            .with_metadata(|metadata| {
+                let info = &metadata.info;
+                let files = info
+                    .iter_file_details()
+                    .enumerate()
+                    .map(|(index, details)| {
+                        let path = details.filename.to_pathbuf();
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| details.filename.to_string());
+                        TorrentFileItem {
+                            index,
+                            name,
+                            path: details.filename.to_string(),
+                            length: details.len,
+                            selected: true,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                CachedMeta {
+                    name: info
+                        .name_or_else(|| Cow::Borrowed("MakeMake Torrent"))
+                        .to_string(),
+                    piece_count: info.info().pieces.as_ref().len() / 20,
+                    piece_length: info.info().piece_length as u64,
+                    total_bytes: info.lengths().total_length(),
+                    files,
+                }
+            })
+            .ok()
+    }
+}
+
+/// One torrent that is queued but not yet handed to librqbit.
+///
+/// A magnet link without resolved metadata used to be awaited inside the `add_torrent`
+/// command: the dialog closed, nothing appeared in the list, and if the swarm was slow the
+/// whole add failed and the torrent silently vanished. Queued magnets are tracked here
+/// instead, so they show up in the queue immediately (with their real name and size as soon
+/// as the swarm answers) and keep retrying in the background.
+#[derive(Debug, Clone)]
+struct PendingAdd {
+    info_hash: String,
+    name: String,
+    magnet_uri: String,
+    output_dir: PathBuf,
+    /// File indices the user picked in the add dialog (survives retries and restarts).
+    only_files: Option<Vec<usize>>,
+    created_at: i64,
+    /// `Some` once an attempt failed; cleared when the user hits retry.
+    error: Option<String>,
+    /// Real metadata, filled in as soon as the swarm answers.
+    total_bytes: u64,
+    piece_count: usize,
+    files: Vec<TorrentFileItem>,
+    attempts: u32,
+    /// Set while a resolver task owns this entry, so parallel polls cannot spawn duplicates.
+    resolving: bool,
+}
+
+/// On-disk shape of a queued magnet (see [`PersistedState`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingRecord {
+    name: String,
+    magnet_uri: String,
+    output_dir: String,
+    #[serde(default)]
+    only_files: Option<Vec<usize>>,
+    #[serde(default)]
+    created_at: i64,
+}
+
+impl PendingAdd {
+    fn to_item(&self) -> TorrentItem {
+        let name = if self.name.trim().is_empty() {
+            format!("Magnet {}", short_hash(&self.info_hash))
+        } else {
+            self.name.clone()
+        };
+
+        TorrentItem {
+            id: self.info_hash.clone(),
+            name,
+            info_hash: self.info_hash.clone(),
+            magnet_uri: Some(self.magnet_uri.clone()),
+            total_bytes: self.total_bytes,
+            downloaded_bytes: 0,
+            uploaded_bytes: 0,
+            download_speed: 0,
+            upload_speed: 0,
+            progress: 0.0,
+            status: if self.error.is_some() {
+                "Error".to_string()
+            } else {
+                "Resolving".to_string()
+            },
+            peers_connected: 0,
+            peers_total: 0,
+            seeds_connected: 0,
+            seeds_total: 0,
+            eta_seconds: None,
+            download_dir: self.output_dir.to_string_lossy().to_string(),
+            files: self.files.clone(),
+            piece_count: self.piece_count,
+            pieces_completed: 0,
+            pieces_bitfield: vec![0u8; COARSE_BUCKETS],
+            file_progress: vec![0u64; self.files.len()],
+            trackers: Vec::new(),
+            created_at: self.created_at,
+            completed_at: None,
+            backed_up: false,
+            backup_path: None,
+            priority: default_priority(),
+            error: self.error.clone(),
+            resolving: true,
+        }
+    }
+}
+
+
 /// Read the announce URLs out of the torrent metadata that librqbit resolved.
 /// Returns `true` when the cached list changed (so the state file gets rewritten).
 fn fill_trackers(handle: &Arc<ManagedTorrent>, extras: &mut TorrentExtras) -> bool {
@@ -126,31 +287,44 @@ struct PersistedState {
     settings: Option<ClientSettings>,
     #[serde(default)]
     torrents: HashMap<String, TorrentExtras>,
+    /// Magnets that were still queued when the app closed, so they are picked up again on
+    /// the next launch instead of silently disappearing.
+    #[serde(default)]
+    pending: HashMap<String, PendingRecord>,
 }
 
+/// MakeMake's BitTorrent engine.
+///
+/// Everything is behind `Arc`, so the engine can be cloned cheaply into background tasks
+/// (magnet resolution) while the UI keeps talking to the same session.
+#[derive(Clone)]
 pub struct TorrentEngine {
     /// Lazily created real BitTorrent session (DHT + listeners + persistence).
-    session: OnceCell<Arc<Session>>,
-    settings: RwLock<ClientSettings>,
-    extras: Mutex<HashMap<String, TorrentExtras>>,
-    state_dir: PathBuf,
+    session: Arc<OnceCell<Arc<Session>>>,
+    settings: Arc<RwLock<ClientSettings>>,
+    extras: Arc<Mutex<HashMap<String, TorrentExtras>>>,
+    state_dir: Arc<PathBuf>,
     /// Set once the shutdown sequence has begun (pausing only, no new work).
-    shutting_down: AtomicBool,
+    shutting_down: Arc<AtomicBool>,
     /// Unix ms of the last durable checkpoint (state file + librqbit session db).
-    checkpoint_at: AtomicI64,
+    checkpoint_at: Arc<AtomicI64>,
     /// Torrents librqbit restored from its session database on this launch.
-    restored: AtomicU32,
+    restored: Arc<AtomicU32>,
     /// Of those, how many MakeMake re-armed automatically.
-    resumed: AtomicU32,
+    resumed: Arc<AtomicU32>,
     /// Swarms currently being archived/relocated by a poll. The UI asks for the torrent
     /// list and the system stats in parallel, which would otherwise race on the same
     /// vault file.
-    maintenance: Mutex<HashSet<String>>,
+    maintenance: Arc<Mutex<HashSet<String>>>,
     /// Swarms the launch-time restore still has to wake up. librqbit re-verifies
     /// restored data and silently drops an unpause that arrives mid-check, so this map
     /// keeps asking until the swarm has been stable-live for a few polls (or the user
     /// pauses it explicitly).
-    pending_rearm: Mutex<HashMap<String, RearmStatus>>,
+    pending_rearm: Arc<Mutex<HashMap<String, RearmStatus>>>,
+    /// Immutable per-torrent metadata (name, file list, piece count), computed once.
+    meta_cache: Arc<Mutex<HashMap<String, Arc<CachedMeta>>>>,
+    /// Magnets that are queued but not yet resolved/handed to librqbit.
+    pending: Arc<Mutex<HashMap<String, PendingAdd>>>,
 }
 
 /// Progress of one launch-time re-arm attempt.
@@ -172,22 +346,60 @@ impl TorrentEngine {
             .map(|p| p.join("MakeMake"))
             .unwrap_or_else(|| PathBuf::from(".").join("MakeMake"));
 
+        Self::with_state_dir(state_dir)
+    }
+
+    /// Build an engine that keeps all of its bookkeeping in `state_dir`.
+    ///
+    /// `new()` uses the platform config directory; tests can point this at a temp folder.
+    pub fn with_state_dir(state_dir: PathBuf) -> Self {
         let persisted = load_persisted_state(&state_dir);
         let settings = persisted
             .settings
+            .clone()
             .unwrap_or_else(|| default_settings(&state_dir));
 
+        // Magnets that were still queued when the app closed come back as queue entries.
+        // They are re-attempted once the session is up (see `restore_previous_session`).
+        let pending = persisted
+            .pending
+            .iter()
+            .map(|(info_hash, record)| {
+                let entry = PendingAdd {
+                    info_hash: info_hash.clone(),
+                    name: record.name.clone(),
+                    magnet_uri: record.magnet_uri.clone(),
+                    output_dir: PathBuf::from(&record.output_dir),
+                    only_files: record.only_files.clone(),
+                    created_at: if record.created_at == 0 {
+                        now_ms()
+                    } else {
+                        record.created_at
+                    },
+                    error: None,
+                    total_bytes: 0,
+                    piece_count: 0,
+                    files: Vec::new(),
+                    attempts: 0,
+                    resolving: false,
+                };
+                (info_hash.clone(), entry)
+            })
+            .collect::<HashMap<_, _>>();
+
         Self {
-            session: OnceCell::new(),
-            settings: RwLock::new(settings),
-            extras: Mutex::new(persisted.torrents),
-            state_dir,
-            shutting_down: AtomicBool::new(false),
-            checkpoint_at: AtomicI64::new(0),
-            restored: AtomicU32::new(0),
-            resumed: AtomicU32::new(0),
-            maintenance: Mutex::new(HashSet::new()),
-            pending_rearm: Mutex::new(HashMap::new()),
+            session: Arc::new(OnceCell::new()),
+            settings: Arc::new(RwLock::new(settings)),
+            extras: Arc::new(Mutex::new(persisted.torrents)),
+            state_dir: Arc::new(state_dir),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            checkpoint_at: Arc::new(AtomicI64::new(0)),
+            restored: Arc::new(AtomicU32::new(0)),
+            resumed: Arc::new(AtomicU32::new(0)),
+            maintenance: Arc::new(Mutex::new(HashSet::new())),
+            pending_rearm: Arc::new(Mutex::new(HashMap::new())),
+            meta_cache: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(pending)),
         }
     }
 
@@ -224,6 +436,12 @@ impl TorrentEngine {
                     )
                 })?;
                 fs::create_dir_all(&persistence_dir).ok();
+
+                // Torrents restored from librqbit's session database never pass through
+                // `add_resolved`, so their payload has to be pre-created here — otherwise a
+                // restored multi-gigabyte torrent would still be allocated densely the
+                // moment the app launches.
+                precreate_restored_payloads(&persistence_dir);
 
                 let build_opts = |port: u16| SessionOptions {
                     dht: Some(DhtSessionConfig::default()),
@@ -284,6 +502,7 @@ impl TorrentEngine {
 
         if handles.is_empty() {
             log::info!("no torrents to restore");
+            self.retry_queued_magnets().await;
             return;
         }
 
@@ -350,6 +569,19 @@ impl TorrentEngine {
             "restored {} torrent(s); re-armed {resumed}",
             self.restored.load(Ordering::SeqCst)
         );
+
+        // Magnets that were still queued last time get another chance now that the session
+        // (and its DHT) is live.
+        self.retry_queued_magnets().await;
+    }
+
+    /// Give every queued magnet another resolution attempt (used on launch).
+    async fn retry_queued_magnets(&self) {
+        let queued: Vec<String> = self.pending.lock().await.keys().cloned().collect();
+        for info_hash in queued {
+            log::info!("retrying queued magnet {info_hash} from the saved session");
+            self.spawn_resolver(info_hash);
+        }
     }
 
     fn handles(session: &Arc<Session>) -> Vec<Arc<ManagedTorrent>> {
@@ -410,19 +642,39 @@ impl TorrentEngine {
     }
 
     async fn persist_state(&self) {
+        let pending: HashMap<String, PendingRecord> = self
+            .pending
+            .lock()
+            .await
+            .iter()
+            .map(|(info_hash, entry)| {
+                (
+                    info_hash.clone(),
+                    PendingRecord {
+                        name: entry.name.clone(),
+                        magnet_uri: entry.magnet_uri.clone(),
+                        output_dir: entry.output_dir.to_string_lossy().to_string(),
+                        only_files: entry.only_files.clone(),
+                        created_at: entry.created_at,
+                    },
+                )
+            })
+            .collect();
+
         let state = PersistedState {
             settings: Some(self.settings.read().await.clone()),
             torrents: self.extras.lock().await.clone(),
+            pending,
         };
 
-        if fs::create_dir_all(&self.state_dir).is_err() {
+        if fs::create_dir_all(self.state_dir.as_path()).is_err() {
             return;
         }
         match serde_json::to_vec_pretty(&state) {
             Ok(json) => {
                 // Write to a temp file first so a crash mid-write can never leave a
                 // truncated state file behind (that would lose every swarm's flags).
-                let target = state_file_path(&self.state_dir);
+                let target = state_file_path(self.state_dir.as_path());
                 let tmp = target.with_extension("json.tmp");
                 match fs::write(&tmp, json).and_then(|_| fs::rename(&tmp, &target)) {
                     Ok(()) => {
@@ -531,13 +783,17 @@ impl TorrentEngine {
 
         let mut items = Vec::with_capacity(handles.len());
         let mut state_changed = false;
+        // Snapshot the bookkeeping once instead of taking/releasing the same mutex several
+        // times per torrent on every UI tick.
+        let mut extras_map = self.extras.lock().await.clone();
+        let mut meta_map = self.meta_cache.lock().await.clone();
 
         for handle in handles {
             let info_hash = handle.info_hash().as_string();
             let mut stats = handle.stats();
             let now = now_ms();
 
-            let existing = self.extras.lock().await.get(&info_hash).cloned();
+            let existing = extras_map.get(&info_hash).cloned();
             let is_new = existing.is_none();
             let mut extras = existing.unwrap_or_default();
 
@@ -653,78 +909,153 @@ impl TorrentEngine {
                 }
             }
 
-            items.push(build_item(&handle, &stats, &extras));
+            // Metadata never changes for an info hash, so it is snapshotted exactly once
+            // (for magnets: as soon as the swarm delivers it).
+            let meta = match meta_map.get(&info_hash) {
+                Some(cached) => Some(cached.clone()),
+                None => CachedMeta::from_handle(&handle).map(|cached| {
+                    let cached = Arc::new(cached);
+                    meta_map.insert(info_hash.clone(), cached.clone());
+                    cached
+                }),
+            };
 
-            self.extras.lock().await.insert(info_hash, extras);
+            items.push(build_item(&handle, &stats, &extras, meta.as_deref()));
+
+            extras_map.insert(info_hash, extras);
             state_changed |= is_new;
         }
+
+        *self.extras.lock().await = extras_map;
+        *self.meta_cache.lock().await = meta_map;
 
         if state_changed {
             self.persist_state().await;
         }
+
+        // Magnets that are still resolving their metadata belong to the queue too: the user
+        // added them, so they must be visible (and retryable) even before librqbit manages
+        // them.
+        self.append_pending_items(&mut items).await;
 
         // Newest first, like every other torrent client.
         items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(items)
     }
 
-    pub async fn get_system_stats(&self) -> SystemStats {
-        let items = self.collect_items().await.unwrap_or_default();
-
-        let mut global_download_speed = 0u64;
-        let mut global_upload_speed = 0u64;
-        let mut total_active_peers = 0u32;
-        let mut active_torrents = 0usize;
-        let mut paused_torrents = 0usize;
-        let mut completed_torrents = 0usize;
-        let mut total_downloaded_all_time = 0u64;
-
-        for item in items.iter() {
-            global_download_speed += item.download_speed;
-            global_upload_speed += item.upload_speed;
-            total_active_peers += item.peers_connected;
-            total_downloaded_all_time += item.downloaded_bytes;
-            if item.status == "Downloading" || item.status == "Seeding" {
-                active_torrents += 1;
-            }
-            if item.status == "Paused" {
-                paused_torrents += 1;
-            }
-            if item.progress >= 100.0 || item.completed_at.is_some() {
-                completed_torrents += 1;
-            }
+    /// Append queued magnets that librqbit does not manage yet.
+    async fn append_pending_items(&self, items: &mut Vec<TorrentItem>) {
+        let pending = self.pending.lock().await;
+        if pending.is_empty() {
+            return;
         }
 
-        let dht_nodes = self
-            .session
-            .get()
-            .and_then(|session| session.get_dht().map(|dht| dht.stats()))
-            .map(|stats| {
-                (stats.routing_table_size + stats.routing_table_size_v6).min(u32::MAX as usize)
-                    as u32
-            })
-            .unwrap_or(0);
+        for entry in pending.values() {
+            if items.iter().any(|item| item.id == entry.info_hash) {
+                continue;
+            }
+            items.push(entry.to_item());
+        }
+    }
 
-        SystemStats {
-            global_download_speed,
-            global_upload_speed,
-            total_active_peers,
-            dht_nodes,
-            total_torrents: items.len(),
-            active_torrents,
-            paused_torrents,
-            completed_torrents,
-            total_downloaded_all_time,
+    /// Global counters, computed straight from librqbit without touching the (much more
+    /// expensive) per-torrent listing. This used to call `collect_items`, which meant every
+    /// UI tick walked the whole torrent list twice.
+    pub async fn get_system_stats(&self) -> SystemStats {
+        let mut stats = SystemStats {
             restored_torrents: self.restored.load(Ordering::SeqCst),
             resumed_torrents: self.resumed.load(Ordering::SeqCst),
             checkpoint_at: self.checkpoint_at.load(Ordering::SeqCst),
+            ..Default::default()
+        };
+
+        if let Some(session) = self.session.get() {
+            for handle in Self::handles(session) {
+                let torrent = handle.stats();
+                if let Some(live) = torrent.live.as_ref() {
+                    stats.global_download_speed += live.download_speed.as_bytes();
+                    stats.global_upload_speed += live.upload_speed.as_bytes();
+                    stats.total_active_peers += live.snapshot.peer_stats.live;
+                }
+                stats.total_downloaded_all_time += torrent.progress_bytes;
+                if torrent.finished {
+                    stats.completed_torrents += 1;
+                    if is_running(&torrent) {
+                        stats.active_torrents += 1;
+                    }
+                } else if is_running(&torrent) {
+                    stats.active_torrents += 1;
+                } else {
+                    stats.paused_torrents += 1;
+                }
+                stats.total_torrents += 1;
+            }
+
+            stats.dht_nodes = session
+                .get_dht()
+                .map(|dht| dht.stats())
+                .map(|dht| {
+                    (dht.routing_table_size + dht.routing_table_size_v6).min(u32::MAX as usize)
+                        as u32
+                })
+                .unwrap_or(0);
         }
+
+        // Queued magnets belong to the queue even though librqbit does not know them yet.
+        stats.total_torrents += self.pending.lock().await.len();
+        stats
+    }
+
+    /// Torrent list + global counters in a single round trip.
+    ///
+    /// The window polls this once per second; splitting it into two commands doubled both
+    /// the IPC traffic and the engine work.
+    pub async fn get_snapshot(&self) -> Result<TorrentSnapshot, String> {
+        let torrents = self.collect_items().await?;
+
+        let mut stats = SystemStats {
+            global_download_speed: torrents.iter().map(|t| t.download_speed).sum(),
+            global_upload_speed: torrents.iter().map(|t| t.upload_speed).sum(),
+            total_active_peers: torrents.iter().map(|t| t.peers_connected).sum(),
+            total_torrents: torrents.len(),
+            active_torrents: torrents
+                .iter()
+                .filter(|t| matches!(t.status.as_str(), "Downloading" | "Seeding"))
+                .count(),
+            paused_torrents: torrents.iter().filter(|t| t.status == "Paused").count(),
+            completed_torrents: torrents
+                .iter()
+                .filter(|t| t.progress >= 100.0 || t.completed_at.is_some())
+                .count(),
+            total_downloaded_all_time: torrents.iter().map(|t| t.downloaded_bytes).sum(),
+            restored_torrents: self.restored.load(Ordering::SeqCst),
+            resumed_torrents: self.resumed.load(Ordering::SeqCst),
+            checkpoint_at: self.checkpoint_at.load(Ordering::SeqCst),
+            ..Default::default()
+        };
+
+        stats.dht_nodes = self
+            .session
+            .get()
+            .and_then(|session| session.get_dht().map(|dht| dht.stats()))
+            .map(|dht| {
+                (dht.routing_table_size + dht.routing_table_size_v6).min(u32::MAX as usize) as u32
+            })
+            .unwrap_or(0);
+
+        Ok(TorrentSnapshot { torrents, stats })
     }
 
     // -----------------------------------------------------------------
     // Torrent lifecycle
     // -----------------------------------------------------------------
 
+    /// Queue a torrent for download.
+    ///
+    /// A `.torrent` (or a magnet whose metadata the dialog already resolved) is handed to
+    /// librqbit straight away. A magnet without metadata is parked in the pending queue and
+    /// resolved in the background, so it appears in the UI immediately — and keeps retrying
+    /// instead of silently disappearing when the swarm is slow.
     pub async fn add_torrent(
         &self,
         preview: TorrentMetadataPreview,
@@ -733,22 +1064,273 @@ impl TorrentEngine {
         let session = self.session().await?;
         let settings = self.settings.read().await.clone();
 
-        // "Ask me every time" + an unset default means the UI normally supplies a
-        // folder, but never let an empty value reach librqbit.
-        let output_dir = resolve_download_dir(&settings, Some(&target_dir))?;
+        // "Ask me every time" + an unset default means the UI normally supplies a folder,
+        // but never let an empty value reach librqbit.
+        let base_dir = resolve_download_dir(&settings, Some(&target_dir))?;
+        let only_files = selected_indices(&preview)?;
+
+        match preview.raw_bencode_base64.as_deref() {
+            Some(encoded) => {
+                let bytes = BASE64
+                    .decode(encoded.trim())
+                    .map_err(|e| format!("invalid .torrent payload: {e}"))?;
+                self.add_resolved(
+                    &session,
+                    &bytes,
+                    preview.magnet_uri.clone(),
+                    &base_dir,
+                    only_files,
+                )
+                .await
+            }
+            None => {
+                let uri = preview.magnet_uri.clone().ok_or_else(|| {
+                    "torrent payload is missing both raw metadata and a magnet URI".to_string()
+                })?;
+
+                Ok(self
+                    .enqueue_pending(preview.name, preview.info_hash, uri, base_dir, only_files)
+                    .await)
+            }
+        }
+    }
+
+    /// Register a magnet that still has to resolve its metadata.
+    async fn enqueue_pending(
+        &self,
+        name: String,
+        info_hash: String,
+        magnet_uri: String,
+        output_dir: PathBuf,
+        only_files: Option<Vec<usize>>,
+    ) -> TorrentItem {
+        let entry = {
+            let mut pending = self.pending.lock().await;
+            let entry = pending
+                .entry(info_hash.clone())
+                .or_insert_with(|| PendingAdd {
+                    info_hash: info_hash.clone(),
+                    name: name.clone(),
+                    magnet_uri: magnet_uri.clone(),
+                    output_dir: output_dir.clone(),
+                    only_files: only_files.clone(),
+                    created_at: now_ms(),
+                    error: None,
+                    total_bytes: 0,
+                    piece_count: 0,
+                    files: Vec::new(),
+                    attempts: 0,
+                    resolving: false,
+                });
+            entry.name = name;
+            entry.magnet_uri = magnet_uri;
+            entry.output_dir = output_dir.clone();
+            entry.only_files = only_files;
+            entry.error = None;
+            entry.clone()
+        };
+
+        log::info!(
+            "queued magnet {} -> {} (metadata resolves in the background)",
+            short_hash(&info_hash),
+            entry.output_dir.display()
+        );
+
+        self.spawn_resolver(info_hash);
+        entry.to_item()
+    }
+
+    /// Spawn at most one background resolver for a queued magnet.
+    fn spawn_resolver(&self, info_hash: String) {
+        let engine = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let only_files = engine
+                .pending
+                .lock()
+                .await
+                .get(&info_hash)
+                .and_then(|entry| entry.only_files.clone());
+            engine.resolve_pending(info_hash, only_files).await;
+        });
+    }
+
+    /// Fetch a queued magnet's metadata from the swarm, then hand it to librqbit.
+    async fn resolve_pending(&self, info_hash: String, only_files: Option<Vec<usize>>) {
+        let (magnet_uri, output_dir) = {
+            let mut pending = self.pending.lock().await;
+            let Some(entry) = pending.get_mut(&info_hash) else {
+                return;
+            };
+            if entry.resolving {
+                return;
+            }
+            entry.resolving = true;
+            entry.error = None;
+            (entry.magnet_uri.clone(), entry.output_dir.clone())
+        };
+
+        let session = match self.session().await {
+            Ok(session) => session,
+            Err(err) => {
+                self.fail_pending(&info_hash, err).await;
+                return;
+            }
+        };
+
+        let mut last_error = String::new();
+        for attempt in 1..=PENDING_RESOLVE_ATTEMPTS {
+            let response = tokio::time::timeout(
+                PENDING_RESOLVE_TIMEOUT,
+                session.add_torrent(
+                    AddTorrent::from_url(magnet_uri.clone()),
+                    Some(AddTorrentOptions {
+                        list_only: true,
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await;
+
+            match response {
+                Ok(Ok(AddTorrentResponse::ListOnly(response))) => {
+                    // Publish the real name, size and file list right away so the queued
+                    // entry stops looking like a placeholder while it starts.
+                    let preview = preview_from_info(
+                        &response.info,
+                        response.info_hash.as_string(),
+                        true,
+                        Some(magnet_uri.clone()),
+                        None,
+                    );
+                    self.publish_pending_metadata(&info_hash, &preview).await;
+
+                    match self
+                        .add_resolved(
+                            &session,
+                            response.torrent_bytes.as_ref(),
+                            Some(magnet_uri.clone()),
+                            &output_dir,
+                            only_files.clone(),
+                        )
+                        .await
+                    {
+                        Ok(item) => {
+                            self.pending.lock().await.remove(&info_hash);
+                            log::info!(
+                                "magnet {} resolved on attempt {attempt}: {}",
+                                short_hash(&info_hash),
+                                item.name
+                            );
+                            return;
+                        }
+                        Err(err) => {
+                            // Metadata is fine; the failure is in adding the torrent.
+                            // Re-resolving would not help, so report it instead of looping.
+                            last_error = err;
+                            break;
+                        }
+                    }
+                }
+                Ok(Ok(_)) => last_error = "the swarm returned an unexpected response".to_string(),
+                Ok(Err(err)) => last_error = format!("cannot resolve magnet metadata: {err}"),
+                Err(_) => {
+                    last_error = format!("no metadata after {}s", PENDING_RESOLVE_TIMEOUT.as_secs())
+                }
+            }
+
+            log::warn!(
+                "magnet {} attempt {attempt}/{PENDING_RESOLVE_ATTEMPTS} failed: {last_error}",
+                short_hash(&info_hash)
+            );
+            if attempt < PENDING_RESOLVE_ATTEMPTS {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+
+        self.fail_pending(&info_hash, last_error).await;
+    }
+
+    /// Keep the queued entry in sync with the metadata the swarm just delivered.
+    async fn publish_pending_metadata(&self, info_hash: &str, preview: &TorrentMetadataPreview) {
+        let mut pending = self.pending.lock().await;
+        if let Some(entry) = pending.get_mut(info_hash) {
+            entry.name = preview.name.clone();
+            entry.total_bytes = preview.total_size;
+            entry.piece_count = preview.piece_count;
+            entry.files = preview.files.clone();
+        }
+    }
+
+    /// Hand resolved metadata to librqbit.
+    ///
+    /// This is where the payload lives on disk: MakeMake pre-creates every selected file as
+    /// an *empty sparse* file first (see [`crate::sparse`]), which keeps both librqbit's
+    /// initial hash check and its `set_len` allocation instant no matter how large the
+    /// torrent is.
+    async fn add_resolved(
+        &self,
+        session: &Arc<Session>,
+        torrent_bytes: &[u8],
+        magnet_uri: Option<String>,
+        base_dir: &Path,
+        only_files: Option<Vec<usize>>,
+    ) -> Result<TorrentItem, String> {
+        let parsed = torrent_from_bytes(torrent_bytes)
+            .map_err(|e| format!("invalid .torrent payload: {e}"))?;
+        let info = parsed
+            .info
+            .data
+            .validate()
+            .map_err(|e| format!("torrent metadata is invalid: {e}"))?;
+        let info_hash = parsed.info_hash.as_string();
+        let name = info
+            .name_or_else(|| format!("Torrent {}", short_hash(&info_hash)))
+            .into_owned();
+
+        // Multi-file torrents get their own folder, exactly like librqbit's default output
+        // layout: dropping 14 payload files straight into the chosen directory collides with
+        // other torrents (and with the user's own files).
+        let multi_file = info.iter_file_details().count() > 1;
+        let output_dir = if multi_file {
+            base_dir.join(sanitize_file_name(&name))
+        } else {
+            base_dir.to_path_buf()
+        };
+        fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("cannot create {}: {e}", output_dir.display()))?;
+
+        // Every payload file is pre-created, not just the selected ones: librqbit's
+        // initialisation extends *all* of a torrent's files (measured on a restored
+        // 133 GiB torrent, files outside `only_files` were extended too), and any file that
+        // is not already sparse gets allocated densely.
+        let payload = payload_files(&info, None);
+
+        match sparse::prepare_payload(&output_dir, &payload) {
+            Ok(summary) => log::info!(
+                "payload {}: {} file(s) pre-created sparse, {} already present",
+                short_hash(&info_hash),
+                summary.files,
+                summary.existing
+            ),
+            Err(err) => log::warn!(
+                "cannot pre-create payload for {}: {err} (the download will still start, but \
+                 librqbit will reserve the full size on disk)",
+                short_hash(&info_hash)
+            ),
+        }
 
         let mut opts = AddTorrentOptions {
             paused: false,
             output_folder: Some(output_dir.to_string_lossy().to_string()),
             // Needed to resume/seed over files that already exist on disk.
             overwrite: true,
+            only_files: only_files.clone(),
             ..Default::default()
         };
 
-        // Magnet links carry their own `tr=` announce list; keep it when we have
-        // already resolved the metadata bytes (adding bytes is instant, but the
-        // bytes alone would lose the trackers declared by the link).
-        if let Some(uri) = preview.magnet_uri.as_deref() {
+        // Magnet links carry their own `tr=` announce list; keep it when we have already
+        // resolved the metadata bytes (the bytes alone would lose the link's trackers).
+        if let Some(uri) = magnet_uri.as_deref() {
             if let Ok(magnet) = Magnet::parse(uri) {
                 let trackers: Vec<String> = magnet
                     .trackers
@@ -762,40 +1344,8 @@ impl TorrentEngine {
             }
         }
 
-        if !preview.files.is_empty() {
-            let selected: Vec<usize> = preview
-                .files
-                .iter()
-                .filter(|f| f.selected)
-                .map(|f| f.index)
-                .collect();
-            if selected.is_empty() {
-                return Err("no files selected for download".to_string());
-            }
-            if selected.len() < preview.files.len() {
-                opts.only_files = Some(selected);
-            }
-        }
-
-        let add = match preview.raw_bencode_base64.as_deref() {
-            Some(encoded) => {
-                let bytes = BASE64
-                    .decode(encoded)
-                    .map_err(|e| format!("invalid .torrent payload: {e}"))?;
-                AddTorrent::from_bytes(bytes)
-            }
-            None => match preview.magnet_uri.as_deref() {
-                Some(uri) => AddTorrent::from_url(uri.to_string()),
-                None => {
-                    return Err(
-                        "torrent payload is missing both raw metadata and a magnet URI".to_string()
-                    )
-                }
-            },
-        };
-
         let response = session
-            .add_torrent(add, Some(opts))
+            .add_torrent(AddTorrent::from_bytes(torrent_bytes.to_vec()), Some(opts))
             .await
             .map_err(|e| format!("failed to add torrent: {e}"))?;
 
@@ -812,10 +1362,8 @@ impl TorrentEngine {
             let _ = session.unpause(&handle).await;
         }
 
-        let info_hash = handle.info_hash().as_string();
-
         let mut extras = TorrentExtras {
-            magnet_uri: preview.magnet_uri.clone(),
+            magnet_uri,
             // A freshly added torrent is started immediately, so remember that intent.
             resume_on_start: true,
             ..Default::default()
@@ -830,7 +1378,14 @@ impl TorrentEngine {
 
         let stats = handle.stats();
         fill_trackers(&handle, &mut extras);
-        let item = build_item(&handle, &stats, &extras);
+        let cached = CachedMeta::from_handle(&handle).map(Arc::new);
+        if let Some(cached) = cached.as_ref() {
+            self.meta_cache
+                .lock()
+                .await
+                .insert(info_hash.clone(), cached.clone());
+        }
+        let item = build_item(&handle, &stats, &extras, cached.as_deref());
 
         self.extras.lock().await.insert(info_hash, extras);
         self.persist_state().await;
@@ -838,7 +1393,46 @@ impl TorrentEngine {
         Ok(item)
     }
 
+    /// Park a queued magnet with a visible error; it stays in the queue so it can be retried.
+    async fn fail_pending(&self, info_hash: &str, error: String) {
+        {
+            let mut pending = self.pending.lock().await;
+            if let Some(entry) = pending.get_mut(info_hash) {
+                entry.resolving = false;
+                entry.error = Some(error.clone());
+            }
+        }
+        log::warn!(
+            "magnet {} could not be queued: {error}",
+            short_hash(info_hash)
+        );
+    }
+
+    /// Re-run a queued magnet that previously failed.
+    pub async fn retry_pending(&self, info_hash: &str) -> Result<(), String> {
+        {
+            let mut pending = self.pending.lock().await;
+            let entry = pending
+                .get_mut(info_hash)
+                .ok_or_else(|| format!("no queued magnet with info hash {info_hash}"))?;
+            if entry.resolving {
+                return Ok(());
+            }
+            entry.error = None;
+            entry.attempts = 0;
+        }
+
+        self.spawn_resolver(info_hash.to_string());
+        Ok(())
+    }
+
+
     pub async fn start_torrent(&self, info_hash: &str) -> Result<(), String> {
+        // A queued magnet has no librqbit handle yet: "start" means "try resolving again".
+        if self.pending.lock().await.contains_key(info_hash) {
+            return self.retry_pending(info_hash).await;
+        }
+
         let session = self.session().await?;
         let (_, handle) = Self::find_handle(&session, info_hash)
             .ok_or_else(|| format!("torrent {info_hash} is not managed by this session"))?;
@@ -913,6 +1507,15 @@ impl TorrentEngine {
     }
 
     pub async fn delete_torrent(&self, info_hash: &str, delete_files: bool) -> Result<(), String> {
+        // A queued magnet never reached librqbit: dropping it from the queue is enough.
+        {
+            let mut pending = self.pending.lock().await;
+            if pending.remove(info_hash).is_some() {
+                log::info!("dropped queued magnet {}", short_hash(info_hash));
+                return Ok(());
+            }
+        }
+
         let session = self.session().await?;
         let (id, _handle) = Self::find_handle(&session, info_hash)
             .ok_or_else(|| format!("torrent {info_hash} is not managed by this session"))?;
@@ -923,6 +1526,7 @@ impl TorrentEngine {
             .map_err(|e| format!("cannot remove torrent: {e}"))?;
 
         self.extras.lock().await.remove(info_hash);
+        self.meta_cache.lock().await.remove(info_hash);
         self.persist_state().await;
         Ok(())
     }
@@ -1133,7 +1737,7 @@ impl TorrentEngine {
         }
 
         let dir = if settings.backup_dir.trim().is_empty() {
-            default_settings(&self.state_dir).backup_dir
+            default_settings(self.state_dir.as_path()).backup_dir
         } else {
             settings.backup_dir.clone()
         };
@@ -1176,7 +1780,7 @@ impl TorrentEngine {
         };
 
         let completed_dir = if settings.completed_torrent_dir.trim().is_empty() {
-            default_settings(&self.state_dir).completed_torrent_dir
+            default_settings(self.state_dir.as_path()).completed_torrent_dir
         } else {
             settings.completed_torrent_dir.clone()
         };
@@ -1335,6 +1939,75 @@ impl TorrentEngine {
 // ---------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------
+
+/// Pre-create sparse placeholders for the torrents librqbit is about to restore.
+///
+/// librqbit's session database is plain JSON (`session.json`) with one `<info_hash>.torrent`
+/// next to it, so every payload path and file selection can be reconstructed *before* the
+/// session starts. Restored torrents do not pass through [`TorrentEngine::add_resolved`], and
+/// without this they would still be allocated densely on launch — the same disk-eating bug,
+/// just on the restore path.
+fn precreate_restored_payloads(persistence_dir: &Path) {
+    #[derive(Deserialize)]
+    struct Database {
+        #[serde(default)]
+        torrents: HashMap<String, Record>,
+    }
+
+    #[derive(Deserialize)]
+    struct Record {
+        #[serde(default)]
+        info_hash: String,
+        #[serde(default)]
+        output_folder: String,
+    }
+
+    let manifest = persistence_dir.join("session.json");
+    let Ok(raw) = fs::read(&manifest) else {
+        return;
+    };
+    let Ok(database) = serde_json::from_slice::<Database>(&raw) else {
+        log::warn!(
+            "cannot read {}; restored payload files will not be pre-created",
+            manifest.display()
+        );
+        return;
+    };
+
+    for record in database.torrents.values() {
+        if record.info_hash.is_empty() || record.output_folder.is_empty() {
+            continue;
+        }
+
+        let torrent_path = persistence_dir.join(format!("{}.torrent", record.info_hash));
+        let Ok(torrent_bytes) = fs::read(&torrent_path) else {
+            continue;
+        };
+        let Ok(parsed) = torrent_from_bytes(&torrent_bytes) else {
+            continue;
+        };
+        let Ok(info) = parsed.info.data.validate() else {
+            continue;
+        };
+
+        // All files, not just `only_files`: librqbit extends every file during init (see
+        // `add_resolved`), so a placeholder that is missing here would be allocated densely.
+        let files = payload_files(&info, None);
+        match sparse::prepare_payload(Path::new(&record.output_folder), &files) {
+            Ok(summary) if summary.files > 0 => log::info!(
+                "pre-created {} sparse placeholder(s) for restored torrent {} ({})",
+                summary.files,
+                short_hash(&record.info_hash),
+                record.output_folder
+            ),
+            Ok(_) => {}
+            Err(err) => log::warn!(
+                "cannot pre-create payload for restored torrent {}: {err}",
+                short_hash(&record.info_hash)
+            ),
+        }
+    }
+}
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -1526,6 +2199,54 @@ fn default_settings(state_dir: &Path) -> ClientSettings {
     }
 }
 
+/// The payload files (relative path + length) that will end up on disk.
+///
+/// Padding files are never created, and a partial selection only touches the files the user
+/// actually asked for.
+fn payload_files<B: AsRef<[u8]>>(
+    info: &ValidatedTorrentMetaV1Info<B>,
+    only_files: Option<&[usize]>,
+) -> Vec<(PathBuf, u64)> {
+    info.iter_file_details()
+        .enumerate()
+        .filter(|(index, details)| {
+            !details.attrs().padding
+                && only_files
+                    .map(|selected| selected.contains(index))
+                    .unwrap_or(true)
+        })
+        .map(|(_, details)| (details.filename.to_pathbuf(), details.len))
+        .collect()
+}
+
+/// Which files the user chose in the add dialog, if they chose a subset.
+///
+/// `None` means "everything"; an empty selection is a user error and is rejected here
+/// rather than producing a torrent that can never finish.
+fn selected_indices(preview: &TorrentMetadataPreview) -> Result<Option<Vec<usize>>, String> {
+    if preview.files.is_empty() {
+        // Magnet whose metadata has not arrived yet: everything will be downloaded.
+        return Ok(None);
+    }
+
+    let selected: Vec<usize> = preview
+        .files
+        .iter()
+        .filter(|file| file.selected)
+        .map(|file| file.index)
+        .collect();
+
+    if selected.is_empty() {
+        return Err("no files selected for download".to_string());
+    }
+
+    if selected.len() == preview.files.len() {
+        Ok(None)
+    } else {
+        Ok(Some(selected))
+    }
+}
+
 /// Build a front-end preview from validated torrent metadata.
 fn preview_from_info<B: AsRef<[u8]>>(
     info: &ValidatedTorrentMetaV1Info<B>,
@@ -1572,34 +2293,19 @@ fn preview_from_info<B: AsRef<[u8]>>(
 
 
 /// Translate a live librqbit handle into the `TorrentItem` model used by the UI.
-fn build_item(handle: &Arc<ManagedTorrent>, stats: &TorrentStats, extras: &TorrentExtras) -> TorrentItem {
+fn build_item(
+    handle: &Arc<ManagedTorrent>,
+    stats: &TorrentStats,
+    extras: &TorrentExtras,
+    meta: Option<&CachedMeta>,
+) -> TorrentItem {
     let info_hash = handle.info_hash().as_string();
 
-    let (piece_count, mut files) = handle
-        .with_metadata(|metadata| {
-            let piece_count = metadata.info.info().pieces.as_ref().len() / 20;
-            let files = metadata
-                .info
-                .iter_file_details()
-                .enumerate()
-                .map(|(index, details)| {
-                    let path = details.filename.to_pathbuf();
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| details.filename.to_string());
-                    TorrentFileItem {
-                        index,
-                        name,
-                        path: details.filename.to_string(),
-                        length: details.len,
-                        selected: true,
-                    }
-                })
-                .collect::<Vec<_>>();
-            (piece_count, files)
-        })
-        .unwrap_or((0, Vec::new()));
+    // Metadata comes from the per-session cache: walking `iter_file_details()` here allocated
+    // a String per path component for every torrent on every single poll.
+    let piece_count = meta.map(|m| m.piece_count).unwrap_or(0);
+    let piece_length = meta.map(|m| m.piece_length).unwrap_or(0);
+    let mut files = meta.map(|m| m.files.clone()).unwrap_or_default();
 
     // Honour the file selection the torrent was added with (if any).
     if let Some(only_files) = handle.only_files() {
@@ -1608,7 +2314,11 @@ fn build_item(handle: &Arc<ManagedTorrent>, stats: &TorrentStats, extras: &Torre
         }
     }
 
-    let total_bytes = stats.total_bytes;
+    let total_bytes = if stats.total_bytes > 0 {
+        stats.total_bytes
+    } else {
+        meta.map(|m| m.total_bytes).unwrap_or(0)
+    };
     let downloaded_bytes = stats.progress_bytes;
     let progress = if total_bytes > 0 {
         ((downloaded_bytes as f64 / total_bytes as f64) * 100.0) as f32
@@ -1657,10 +2367,14 @@ fn build_item(handle: &Arc<ManagedTorrent>, stats: &TorrentStats, extras: &Torre
         TorrentStatsState::Error => "Error",
     };
 
-    let pieces_completed = ((piece_count as f64) * (progress as f64 / 100.0)).round() as usize;
-    let pieces_bitfield = (0..64u32)
-        .map(|i| u8::from((i as f32 / 64.0) < (progress / 100.0)))
-        .collect();
+    // Verified pieces are derived from the bytes librqbit reports as present, so the number
+    // is honest even though the visual map is a coarse bucketing of it.
+    let pieces_completed = if piece_length > 0 {
+        ((downloaded_bytes / piece_length) as usize).min(piece_count)
+    } else {
+        0
+    };
+    let pieces_bitfield = coarse_piece_map(downloaded_bytes, total_bytes);
 
     // librqbit only reports per-file progress once the torrent is initialized; pad the
     // vector so the UI can index it by file position without bounds checks.
@@ -1671,8 +2385,9 @@ fn build_item(handle: &Arc<ManagedTorrent>, stats: &TorrentStats, extras: &Torre
 
     TorrentItem {
         id: info_hash.clone(),
-        name: handle
-            .name()
+        name: meta
+            .map(|m| m.name.clone())
+            .or_else(|| handle.name())
             .unwrap_or_else(|| format!("Torrent {}", short_hash(&info_hash))),
         info_hash,
         magnet_uri: extras.magnet_uri.clone(),
@@ -1701,7 +2416,27 @@ fn build_item(handle: &Arc<ManagedTorrent>, stats: &TorrentStats, extras: &Torre
         backup_path: extras.backup_path.clone(),
         priority: extras.priority.clone(),
         error: stats.error.clone(),
+        resolving: false,
     }
+}
+
+/// Coarse, fixed-size map of how much of the payload is verified.
+///
+/// librqbit does not expose the real piece bitfield, and a torrent like a 133 GiB repack has
+/// ~34k pieces — one DOM node per piece is what used to lock up the details drawer. The UI
+/// only ever draws a small matrix, so it gets a constant number of buckets derived from the
+/// verified byte count.
+fn coarse_piece_map(downloaded_bytes: u64, total_bytes: u64) -> Vec<u8> {
+    let fraction = if total_bytes == 0 {
+        0.0
+    } else {
+        (downloaded_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0)
+    };
+    let filled = (fraction * COARSE_BUCKETS as f64).floor() as usize;
+
+    (0..COARSE_BUCKETS)
+        .map(|bucket| u8::from(bucket < filled))
+        .collect()
 }
 
 
@@ -1835,11 +2570,18 @@ mod tests {
             "tracker extraction must be idempotent once cached"
         );
 
-        let item = build_item(&handle, &stats, &extras);
+        // Production walks the same path: metadata is snapshotted once, then reused.
+        let cached = CachedMeta::from_handle(&handle).expect("metadata should be available");
+        assert_eq!(cached.piece_count, 1);
+        assert_eq!(cached.files.len(), 1);
+
+        let item = build_item(&handle, &stats, &extras, Some(&cached));
         assert_eq!(item.name, "test.txt");
         assert_eq!(item.total_bytes, 5);
         assert_eq!(item.piece_count, 1);
         assert_eq!(item.files.len(), 1);
+        assert_eq!(item.pieces_bitfield.len(), COARSE_BUCKETS);
+        assert!(!item.resolving);
         assert_eq!(item.status, "Paused");
         assert_eq!(item.priority, "Normal");
         assert_eq!(item.trackers, extras.trackers);
@@ -1861,6 +2603,168 @@ mod tests {
         assert!(TorrentEngine::find_handle(&session, &item.info_hash).is_none());
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// Multi-file torrent with three files, the middle one a BEP-47 padding file.
+    fn multi_file_torrent_bencode() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            b"d8:announce26:udp://tracker.test:1337/xx4:infod5:filesl\
+              d6:lengthi5e4:pathl5:a.txtee\
+              d4:attr1:p6:lengthi7e4:pathl7:pad.binee\
+              d6:lengthi9e4:pathl5:c.txtee\
+              e4:name3:dir12:piece lengthi16384e6:pieces20:",
+        );
+        bytes.extend_from_slice(&[b'A'; 20]);
+        bytes.extend_from_slice(b"ee");
+        bytes
+    }
+
+    #[test]
+    fn payload_paths_skip_padding_and_follow_the_selection() {
+        let bytes = multi_file_torrent_bencode();
+        let parsed = torrent_from_bytes(&bytes).expect("sample must parse");
+        let info = parsed.info.data.validate().expect("sample must validate");
+
+        let all = payload_files(&info, None);
+        assert_eq!(
+            all,
+            vec![
+                (PathBuf::from("a.txt"), 5),
+                (PathBuf::from("c.txt"), 9)
+            ],
+            "padding must never be created on disk"
+        );
+
+        // Selecting only the padding file leaves nothing to pre-create.
+        assert!(payload_files(&info, Some(&[1])).is_empty());
+
+        assert_eq!(payload_files(&info, Some(&[2])), vec![(PathBuf::from("c.txt"), 9)]);
+    }
+
+    #[test]
+    fn restored_payloads_are_pre_created_sparse() {
+        let root = std::env::temp_dir().join(format!("makemake-restore-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let persistence = root.join("session");
+        let output = root.join("downloads");
+        fs::create_dir_all(&persistence).unwrap();
+
+        let bytes = multi_file_torrent_bencode();
+        let info_hash = torrent_from_bytes(&bytes)
+            .expect("sample must parse")
+            .info_hash
+            .as_string();
+        fs::write(persistence.join(format!("{info_hash}.torrent")), &bytes).unwrap();
+
+        let output_json = output.to_string_lossy().replace('\\', "\\\\");
+        fs::write(
+            persistence.join("session.json"),
+            format!(
+                r#"{{"torrents":{{"0":{{"info_hash":"{info_hash}","trackers":[],"output_folder":"{output_json}","only_files":[0],"is_paused":false}}}}}}"#
+            ),
+        )
+        .unwrap();
+
+        precreate_restored_payloads(&persistence);
+
+        // librqbit extends every file of a torrent during initialisation, so every payload
+        // file gets a sparse placeholder — padding files never do.
+        for name in ["a.txt", "c.txt"] {
+            let path = output.join(name);
+            assert!(path.is_file(), "{name} must exist");
+            assert_eq!(
+                fs::metadata(&path).unwrap().len(),
+                0,
+                "placeholders stay empty so librqbit's check is instant"
+            );
+        }
+        assert!(!output.join("pad.bin").exists(), "padding is never created");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn coarse_piece_map_stays_small_and_tracks_progress() {
+        assert_eq!(coarse_piece_map(0, 0), vec![0u8; COARSE_BUCKETS]);
+
+        let half = coarse_piece_map(50, 100);
+        assert_eq!(half.len(), COARSE_BUCKETS);
+        assert_eq!(half.iter().filter(|bit| **bit == 1).count(), COARSE_BUCKETS / 2);
+
+        assert!(coarse_piece_map(100, 100).iter().all(|bit| *bit == 1));
+        assert!(coarse_piece_map(10, 100).len() < 1000, "must not scale with piece count");
+    }
+
+    #[test]
+    fn queued_magnets_are_listed_before_librqbit_knows_them() {
+        let mut queued = PendingAdd {
+            info_hash: "abcdef0123456789abcdef0123456789abcdef01".to_string(),
+            name: String::new(),
+            magnet_uri: "magnet:?xt=urn:btih:abc".to_string(),
+            output_dir: PathBuf::from("D:/downloads"),
+            only_files: None,
+            created_at: 1,
+            error: None,
+            total_bytes: 0,
+            piece_count: 0,
+            files: Vec::new(),
+            attempts: 1,
+            resolving: true,
+        };
+
+        let item = queued.to_item();
+        assert_eq!(item.status, "Resolving");
+        assert!(item.resolving);
+        assert_eq!(item.id, queued.info_hash);
+        assert!(item.name.starts_with("Magnet "), "missing name gets a placeholder");
+        assert_eq!(item.pieces_bitfield.len(), COARSE_BUCKETS);
+
+        queued.error = Some("no metadata after 180s".to_string());
+        let failed = queued.to_item();
+        assert_eq!(failed.status, "Error");
+        assert_eq!(failed.error.as_deref(), Some("no metadata after 180s"));
+        assert!(failed.resolving, "a failed magnet is still a queue entry");
+    }
+
+    #[test]
+    fn file_selection_becomes_an_only_files_list() {
+        let file = |index: usize, selected: bool| TorrentFileItem {
+            index,
+            name: format!("file-{index}.bin"),
+            path: format!("file-{index}.bin"),
+            length: 1,
+            selected,
+        };
+        let mut preview = TorrentMetadataPreview {
+            name: "payload".to_string(),
+            info_hash: "00".to_string(),
+            total_size: 2,
+            piece_length: 1,
+            piece_count: 2,
+            files: vec![file(0, true), file(1, false)],
+            is_magnet: false,
+            magnet_uri: None,
+            raw_bencode_base64: None,
+        };
+
+        assert_eq!(selected_indices(&preview).unwrap(), Some(vec![0]));
+
+        preview.files[1].selected = true;
+        assert_eq!(
+            selected_indices(&preview).unwrap(),
+            None,
+            "selecting everything means 'no filter'"
+        );
+
+        for entry in preview.files.iter_mut() {
+            entry.selected = false;
+        }
+        assert!(selected_indices(&preview).is_err(), "empty selection is rejected");
+
+        // A magnet whose metadata has not arrived downloads everything.
+        preview.files.clear();
+        assert_eq!(selected_indices(&preview).unwrap(), None);
     }
 
     #[test]

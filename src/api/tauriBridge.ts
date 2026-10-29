@@ -1,4 +1,11 @@
-import { TorrentItem, TorrentMetadataPreview, ClientSettings, SystemStats, PeerDetail } from '../types/torrent';
+import {
+  TorrentItem,
+  TorrentMetadataPreview,
+  ClientSettings,
+  SystemStats,
+  PeerDetail,
+  TorrentSnapshot,
+} from '../types/torrent';
 
 // Detect whether we are running within the Tauri desktop container
 const isTauriEnv = (): boolean => {
@@ -264,6 +271,26 @@ export const TauriBridge = {
       return invokeTauri<TorrentItem[]>('get_torrents');
     }
     return devStore.getTorrents();
+  },
+
+  /**
+   * One poll = one IPC round trip. The window used to ask for the torrent list and the
+   * system stats separately, which made the engine walk the whole queue twice per tick.
+   */
+  async getSnapshot(): Promise<TorrentSnapshot> {
+    if (isTauriEnv()) {
+      return invokeTauri<TorrentSnapshot>('get_snapshot');
+    }
+    return { torrents: devStore.getTorrents(), stats: devStore.getSystemStats() };
+  },
+
+  /** Re-arm a queued magnet whose metadata resolution failed. */
+  async retryPending(id: string): Promise<void> {
+    if (isTauriEnv()) {
+      await invokeTauri<void>('retry_pending', { id });
+      return;
+    }
+    devStore.startTorrent(id);
   },
 
   async getSettings(): Promise<ClientSettings> {
