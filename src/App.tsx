@@ -6,12 +6,21 @@ import { TorrentDetailsDrawer, DetailTab } from './components/TorrentDetailsDraw
 import { FooterStatusBar } from './components/FooterStatusBar';
 import { ContextMenu } from './components/ContextMenu';
 import { ConfirmModal } from './components/ConfirmModal';
-import { AddTorrentModal } from './components/AddTorrentModal';
+import { AddTorrentModal, AddConfirmOptions } from './components/AddTorrentModal';
 import { SettingsModal } from './components/SettingsModal';
 import { SplashScreen } from './components/SplashScreen';
 import { TauriBridge } from './api/tauriBridge';
 import { TorrentItem, ClientSettings, SystemStats, TorrentMetadataPreview } from './types/torrent';
 import { cyberAudio } from './utils/cyberAudio';
+
+/** Compact byte formatting for the toasts (each modal keeps its own local copy). */
+const formatBytes = (bytes: number) => {
+  if (!bytes || bytes <= 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+};
 
 export const App: React.FC = () => {
   const [showSplash, setShowSplash] = useState(true);
@@ -107,6 +116,8 @@ export const App: React.FC = () => {
 
   // Sync state from Tauri backend / dev engine
   const restoreAnnouncedRef = useRef(false);
+  // The "previous run crashed" notice is announced once per launch as well.
+  const crashAnnouncedRef = useRef(false);
   // Which torrent the drawer shows. Kept in a ref so the poll never depends on the
   // selection: that dependency used to re-create the polling effect on every tick, which
   // turned the 1 s interval into an unbounded loop of IPC calls.
@@ -136,6 +147,16 @@ export const App: React.FC = () => {
           resumed > 0
             ? `Session recovered: ${snapshot.stats.restoredTorrents} swarm${snapshot.stats.restoredTorrents === 1 ? '' : 's'} restored · ${resumed} re-armed`
             : `Session recovered: ${snapshot.stats.restoredTorrents} swarm${snapshot.stats.restoredTorrents === 1 ? '' : 's'} restored in dormant state (auto-resume off)`,
+        );
+      }
+
+      // The previous run never sealed its session (crash, power loss, kill): say so, and
+      // mention what the engine did about it.
+      if (!crashAnnouncedRef.current && snapshot.stats.crashedLastRun) {
+        crashAnnouncedRef.current = true;
+        showToast(
+          'Previous session ended unexpectedly — resume data re-verified and missing .torrent archives rewritten',
+          'danger',
         );
       }
     } catch (e) {
@@ -472,17 +493,33 @@ export const App: React.FC = () => {
     });
   };
 
-  const handleAddConfirm = async (preview: TorrentMetadataPreview, targetDir: string) => {
+  const handleAddConfirm = async (
+    preview: TorrentMetadataPreview,
+    targetDir: string,
+    options?: AddConfirmOptions,
+  ) => {
     cyberAudio.playEngage();
     setIsAddModalOpen(false);
+    const mode = options?.mode ?? 'resume';
+    const onDisk = options?.existing?.bytesPresent ?? 0;
     try {
-      const item = await TauriBridge.addTorrent(preview, targetDir);
+      const item = await TauriBridge.addTorrent(preview, targetDir, mode);
       selectedIdRef.current = item.id;
       setSelectedTorrent(item);
       setInitialAddPayload(null);
-      showToast(
-        item.resolving ? `Queued swarm: ${item.name} — resolving metadata…` : `Swarm engaged: ${item.name}`,
-      );
+      if (mode === 'replace') {
+        showToast(`Restarting ${item.name} — existing payload erased, verifying from zero`);
+      } else if (onDisk > 0) {
+        showToast(
+          `Resuming ${item.name} — ${formatBytes(onDisk)} already on disk, verifying pieces…`,
+        );
+      } else {
+        showToast(
+          item.resolving
+            ? `Queued swarm: ${item.name} — resolving metadata…`
+            : `Swarm engaged: ${item.name}`,
+        );
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
     }

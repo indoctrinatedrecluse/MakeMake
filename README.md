@@ -4,7 +4,7 @@
 ```
                      .---.
                     /     \
-                   | () () |       MAKEMAKE PROTOCOL v0.1.4
+                   | () () |       MAKEMAKE PROTOCOL v0.1.6
                     \  ^  /        [SYSTEM: AHU-ONLINE]
                      |||||         [SWARM: TANGATA-MANU ACTIVE]
                     /=====\
@@ -41,6 +41,20 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
     MakeMake always asks, and falls back to the OS Downloads folder if the picker is cancelled.
   * Files are written exactly where you choose; every torrent then gets its own folder inside it,
     named after the torrent (single-file torrents included).
+* **Existing folder? MakeMake asks before touching it.** Because every torrent has a predictable
+  folder, MakeMake can tell before a single byte moves whether
+  `<download folder>/<torrent name>` is already there. If it is, the dialog shows a
+  pre-flight report — bytes already on disk versus the declared size, how many files exist, how many
+  are complete, and how many *unrelated* files share the folder — and offers two choices:
+  * 🛡 **Resume & Verify** (default): the payload is left exactly as it is; `librqbit` re-hashes the
+    files that are there, keeps every piece that still matches and downloads only the missing ones.
+    A half-finished download, or one whose torrent was removed from the list, continues where it
+    stopped instead of starting over.
+  * 🧨 **Start Over**: deletes only the paths this torrent declares, only regular files, only inside
+    its own folder — never a wildcard, never a directory, never through a symlink, never outside the
+    folder. Unrelated files are kept, and the button turns red for the occasion.
+  * If the swarm is already in the queue the prompt says so, and re-adding it just continues that
+    entry. A magnet whose metadata has not arrived yet is skipped, since its folder name is unknown.
 
 ### 2. Temporal Auto-Backup Engine
 * **Automatic `.torrent` Archival**: the archive is written the moment the engine knows the
@@ -59,25 +73,41 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
   the UI, then pauses every swarm — seeding or leeching, complete or not — drops all peer
   connections and flushes `librqbit`'s resume database (`session.json`, per-torrent `.bitv` piece
   maps, `.torrent` bytes) before the process exits. Nothing is ever left half-written.
+  * Both exit paths are covered: the window's `CloseRequested` **and** `RunEvent::ExitRequested`
+    (OS shutdown/logoff, `app.exit()`, the last window being destroyed). The seal is idempotent, so
+    they can never race.
+* **Panic hook**: a panic is logged and gets a bounded (5 s, separate thread) attempt to pause every
+  swarm and flush resume data. A panic on the UI thread then exits the process (the event loop
+  cannot recover); a panic in a background task leaves the app running with everything paused.
 * **Intent is remembered**: a durability checkpoint is written every 15 s, so even a hard crash
   still knows which swarms were live. On the next launch those swarms are re-armed automatically
   (optional) while explicitly paused swarms always stay parked.
+* **Crash detection + archive self-repair**: a `session-active.marker` is written at launch and
+  removed only after a clean seal. If the next launch finds it, the previous run died abruptly —
+  the restored swarms are re-armed and every `.torrent` archive that is missing (or was never
+  confirmed) is rewritten from the metadata `librqbit` restored. The auto-backup vault therefore
+  doubles as the recovery path for the one piece of state a crash could otherwise lose: if the
+  session database itself is gone, drag the archived `.torrent` files back in and the
+  existing-folder prompt re-adopts the payload on disk instead of downloading it again.
 * **Self-healing restore**: a restored swarm has to re-verify its pieces, and `librqbit` defers
   (and occasionally re-applies) a pause that lands mid-check — so MakeMake keeps re-arming until
   the swarm has been stably live, with a bounded retry budget.
 
 ### 4. Sacred Context HUD (Right-Click Context Menu)
-* Comprehensive operational menu for each data monolith:
+* Comprehensive operational menu for each data monolith, grouped into
+  **Transfer / Storage / Payload / Registry** sections:
   * ⚡ **Awaken (Resume/Start)** / ⏸ **Dormant (Pause)**: Start or choke the swarm connection.
   * 🔄 **Verify Obsidian Integrity (Force Recheck)**: Recalculate piece hashes against the local disk payload.
-  * 📂 **Open Sacred Chamber**: Open the download directory. 🔍 **Reveal Payload** selects it in Explorer.
+  * ⏱ **Swarm Priority** expander: High / Normal / Low (persisted, current value ticked).
+  * 📂 **Open Sacred Chamber**: Open the torrent's payload folder. 🔍 **Reveal Payload** selects it in Explorer.
   * 📄 **Open Downloaded File** for single-file torrents.
   * 🗂 **Select Payload Files…**: Jump to the drawer's Files tab to change the file selection live.
-  * 📋 **Copy Info Hash / Magnet Link / Download Path**.
-  * ⏱ **Swarm Priority** submenu: High / Normal / Low (persisted).
+  * 📋 **Copy to Clipboard** expander: info hash, magnet link, download path and the tracker URLs.
   * 💾 **Backup .torrent Now** and **Save .torrent As…** (native save dialog).
-  * 🗑 **Remove from Swarm (Deregister)** — keeps the data on disk.
-  * 💥 **Purge Monolith & Files** — irreversible, behind the hazard modal.
+  * 🗑 **Remove from Swarm (Keep Files)** → 💥 **Purge Monolith & Files** (irreversible, hazard modal).
+* The panel measures itself before it is placed, so the destructive rows can never fall off the
+  bottom of the window; it closes on scroll, resize, blur and Escape, and is keyboard navigable
+  (↑/↓/Enter/Escape).
 * Header actions: **Pause all / Resume all**. Status bar: **turtle throttle** toggle.
 
 ### 5. Safety Gates & Irreversible Action Modals
@@ -199,11 +229,11 @@ npm run dev
 # Tauri Desktop Dev Mode
 npm run tauri dev
 
-# Production Build
+# Production Build (TypeScript check + Vite bundle)
 npm run build
-```
-# Production Build
-npm run build
+
+# Native engine tests (offline librqbit sessions, filesystem helpers)
+cd src-tauri && cargo test --release --locked
 ```
 
 ## 📜 License

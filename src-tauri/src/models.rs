@@ -8,6 +8,40 @@ pub struct TorrentFileItem {
     pub path: String,
     pub length: u64,
     pub selected: bool,
+    /// BEP-47 padding file: it is never written to disk, so it must not be offered for
+    /// selection nor counted when MakeMake inspects an existing payload folder.
+    #[serde(default)]
+    pub padding: bool,
+}
+
+/// What already sits in the folder a torrent is about to be written to.
+///
+/// MakeMake resolves every torrent to `<download folder>/<torrent name>`, so an existing
+/// folder means the user either has an earlier attempt, a complete copy, or an unrelated
+/// folder that happens to share the name. The add dialog asks before touching it; when the
+/// user confirms, librqbit only has to hash the files that are already there and download
+/// the missing pieces instead of starting from zero.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingPayload {
+    /// Absolute path of the per-torrent folder (`<download folder>/<torrent name>`).
+    pub folder: String,
+    /// `true` when that folder already exists on disk.
+    pub exists: bool,
+    /// Payload files (of the current selection) that exist on disk.
+    pub files_present: usize,
+    /// Payload files (of the current selection) that are already at their full length.
+    pub files_complete: usize,
+    /// Number of payload files in the current selection.
+    pub files_total: usize,
+    /// Logical bytes on disk for those files, capped at each file's declared length.
+    pub bytes_present: u64,
+    /// Declared bytes of the current selection.
+    pub bytes_total: u64,
+    /// Entries inside the folder that are *not* part of this torrent (capped).
+    pub foreign_files: usize,
+    /// The swarm is already in the queue, so re-adding it will resume rather than restart.
+    pub already_managed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,4 +227,9 @@ pub struct SystemStats {
     /// Total size of that volume.
     #[serde(default)]
     pub disk_total_bytes: u64,
+    /// The previous run ended without sealing the session (crash, power loss, kill).
+    /// The next launch re-arms the restored swarms and re-writes any missing
+    /// `.torrent` archive, so the vault can never be left incomplete.
+    #[serde(default)]
+    pub crashed_last_run: bool,
 }

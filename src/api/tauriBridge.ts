@@ -6,6 +6,8 @@ import {
   PeerDetail,
   TorrentSnapshot,
   TorrentDiskUsage,
+  ExistingPayload,
+  AddMode,
 } from '../types/torrent';
 
 // Detect whether we are running within the Tauri desktop container
@@ -439,11 +441,31 @@ export const TauriBridge = {
     console.log(`[Reveal Path]: ${path}`);
   },
 
-  async addTorrent(preview: TorrentMetadataPreview, targetDir: string): Promise<TorrentItem> {
+  async addTorrent(
+    preview: TorrentMetadataPreview,
+    targetDir: string,
+    mode: AddMode = 'resume',
+  ): Promise<TorrentItem> {
     if (isTauriEnv()) {
-      return invokeTauri<TorrentItem>('add_torrent', { preview, targetDir });
+      return invokeTauri<TorrentItem>('add_torrent', { preview, targetDir, mode });
     }
     return devStore.addTorrent(preview, targetDir);
+  },
+
+  /**
+   * Pre-flight for the add dialog: does `<dir>/<torrent name>` already exist, and how much
+   * of the current selection is already on disk? `null` when the metadata (and therefore the
+   * folder name) is not known yet.
+   */
+  async inspectDestination(
+    preview: TorrentMetadataPreview,
+    targetDir: string,
+  ): Promise<ExistingPayload | null> {
+    if (isTauriEnv()) {
+      return invokeTauri<ExistingPayload | null>('inspect_destination', { preview, targetDir });
+    }
+    // The browser dev store has no filesystem to look at.
+    return null;
   },
 
   async parseMagnetLink(magnetUri: string): Promise<TorrentMetadataPreview> {

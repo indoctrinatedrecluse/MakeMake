@@ -13,9 +13,24 @@ import {
   UploadCloud,
   HardDrive,
   Film,
+  RefreshCw,
+  Trash2,
+  ShieldCheck,
 } from 'lucide-react';
-import { TorrentMetadataPreview, TorrentFileItem } from '../types/torrent';
+import {
+  TorrentMetadataPreview,
+  TorrentFileItem,
+  ExistingPayload,
+  AddMode,
+} from '../types/torrent';
 import { TauriBridge } from '../api/tauriBridge';
+
+/** What the dialog tells the engine to do with the chosen destination. */
+export interface AddConfirmOptions {
+  mode: AddMode;
+  /** The pre-flight report, so the caller can toast "3.1 GB already on disk". */
+  existing: ExistingPayload | null;
+}
 
 interface AddTorrentModalProps {
   isOpen: boolean;
@@ -25,7 +40,11 @@ interface AddTorrentModalProps {
   diskFreeBytes?: number;
   initialMagnetOrFile?: { type: 'magnet' | 'file'; data: string; name?: string } | null;
   onClose: () => void;
-  onAddConfirm: (preview: TorrentMetadataPreview, targetDir: string) => void;
+  onAddConfirm: (
+    preview: TorrentMetadataPreview,
+    targetDir: string,
+    options: AddConfirmOptions,
+  ) => void;
 }
 
 const formatBytes = (bytes: number) => {
@@ -53,6 +72,13 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
   const [dirError, setDirError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  /** Pre-flight of the per-torrent folder (`<dir>/<torrent name>`). */
+  const [existing, setExisting] = useState<ExistingPayload | null>(null);
+  /** The destination folder the report describes — a stale report must never be trusted. */
+  const [existingDir, setExistingDir] = useState<string | null>(null);
+  const [isInspecting, setIsInspecting] = useState(false);
+  const [addMode, setAddMode] = useState<AddMode>('resume');
 
   /**
    * Ask where the payload should land. MakeMake prompts for the location on every
@@ -154,6 +180,9 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
       setInputMagnet('');
       setIsLoadingMetadata(false);
       setDownloadDir(defaultDownloadDir);
+      setExisting(null);
+      setIsInspecting(false);
+      setAddMode('resume');
       return;
     }
 
@@ -182,22 +211,91 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
     if (!preview) return;
     setPreview({
       ...preview,
-      files: preview.files.map((f) => (f.index === index ? { ...f, selected: !f.selected } : f)),
+      files: preview.files.map((f) =>
+        f.index === index && !f.padding ? { ...f, selected: !f.selected } : f,
+      ),
     });
   };
 
   const handleSelectAll = (select: boolean) => {
     if (!preview) return;
-    setPreview({ ...preview, files: preview.files.map((f) => ({ ...f, selected: select })) });
+    setPreview({
+      ...preview,
+      // Padding files are never written, so they are not part of "all".
+      files: preview.files.map((f) => (f.padding ? f : { ...f, selected: select })),
+    });
   };
+
+  /**
+   * Pre-flight of the destination.
+   *
+   * Every torrent is written into `<download folder>/<torrent name>`, so the engine can tell
+   * up front whether that folder already exists and how much of the selection is already on
+   * disk. Typing a path must not stat the disk on every keystroke, hence the debounce.
+   */
+  useEffect(() => {
+    if (!isOpen || !preview) {
+      setExisting(null);
+      setExistingDir(null);
+      setIsInspecting(false);
+      return;
+    }
+
+    const dir = downloadDir.trim();
+    if (!dir || preview.files.length === 0) {
+      // No metadata yet (slow magnet) or no destination: nothing to inspect.
+      setExisting(null);
+      setExistingDir(null);
+      setIsInspecting(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsInspecting(true);
+    const timer = window.setTimeout(() => {
+      TauriBridge.inspectDestination(preview, dir)
+        .then((report) => {
+          if (cancelled) return;
+          setExisting(report);
+          // The report is only valid for the folder it was measured against.
+          setExistingDir(dir);
+          // "Start over" only exists for a folder that is actually there.
+          if (!report?.exists) setAddMode('resume');
+        })
+        .catch((err) => {
+          console.warn('Destination pre-flight failed', err);
+          if (cancelled) return;
+          setExisting(null);
+          setExistingDir(null);
+        })
+        .finally(() => {
+          if (!cancelled) setIsInspecting(false);
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [isOpen, preview, downloadDir]);
 
   if (!isOpen) return null;
 
-  const selectedFiles = preview ? preview.files.filter((f) => f.selected) : [];
+  const payloadFiles = preview ? preview.files.filter((f) => !f.padding) : [];
+  const selectedFiles = payloadFiles.filter((f) => f.selected);
   const selectedSize = selectedFiles.reduce((acc, f) => acc + f.length, 0);
-  const hasFileList = !!preview && preview.files.length > 0;
+  const hasFileList = payloadFiles.length > 0;
   const canSubmit =
     !!preview && !!downloadDir.trim() && (!hasFileList || selectedFiles.length > 0);
+
+  // Existing-folder prompt (see the pre-flight effect above). A report only counts while it
+  // describes the folder currently typed into the destination box.
+  const reportIsCurrent = !!existing && existingDir === downloadDir.trim();
+  const folderExists = reportIsCurrent && existing.exists;
+  const resumePercent =
+    existing && reportIsCurrent && existing.bytesTotal > 0
+      ? Math.min(100, (existing.bytesPresent / existing.bytesTotal) * 100)
+      : 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
@@ -438,8 +536,129 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
                     : 'Using the vault default from Settings — change it there or type a path above.'}
                 </div>
               )}
+              {isInspecting && (
+                <div className="mt-1.5 flex items-center gap-1.5 text-[10px] font-mono text-slate-500">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>Scanning the destination chamber for existing payload…</span>
+                </div>
+              )}
             </div>
 
+            {/* Existing destination: ask before touching it */}
+            {folderExists && existing && (
+              <div className="rounded-lg border border-cyber-gold/50 bg-cyber-gold/5 p-3 space-y-2.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2 min-w-0">
+                    <AlertTriangle className="w-4 h-4 text-cyber-gold flex-shrink-0 mt-[1px]" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-mono font-bold text-cyber-gold tracking-wide">
+                        DESTINATION CHAMBER ALREADY EXISTS
+                      </div>
+                      <div
+                        className="text-[10px] font-mono text-slate-400 truncate"
+                        title={existing.folder}
+                      >
+                        {existing.folder}
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-[11px] font-mono font-bold text-cyber-cyan flex-shrink-0">
+                    {resumePercent.toFixed(1)}% ON DISK
+                  </span>
+                </div>
+
+                <div className="h-1.5 w-full rounded bg-obsidian-950 overflow-hidden border border-slate-800">
+                  <div
+                    className="h-full bg-gradient-to-r from-cyber-cyan to-cyber-teal"
+                    style={{ width: `${resumePercent}%` }}
+                  />
+                </div>
+
+                <div className="text-[10px] font-mono text-slate-400 leading-relaxed">
+                  {existing.bytesPresent > 0 ? (
+                    <>
+                      <span className="text-cyber-cyan font-bold">
+                        {formatBytes(existing.bytesPresent)}
+                      </span>{' '}
+                      of {formatBytes(existing.bytesTotal)} already on disk ·{' '}
+                      {existing.filesPresent}/{existing.filesTotal} file
+                      {existing.filesTotal === 1 ? '' : 's'} present · {existing.filesComplete}{' '}
+                      complete.
+                    </>
+                  ) : (
+                    <>The folder exists but holds none of this torrent&apos;s payload files.</>
+                  )}
+                  {existing.foreignFiles > 0 && (
+                    <div className="text-cyber-gold">
+                      It also holds {existing.foreignFiles}
+                      {existing.foreignFiles >= 1000 ? '+' : ''} unrelated file
+                      {existing.foreignFiles === 1 ? '' : 's'} — resuming never touches those.
+                    </div>
+                  )}
+                  {existing.alreadyManaged && (
+                    <div className="text-cyber-vermilion">
+                      This swarm is already in your queue — engaging it again continues that
+                      entry.
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setAddMode('resume')}
+                    className={`text-left rounded border px-2.5 py-2 transition-colors ${
+                      addMode === 'resume'
+                        ? 'border-cyber-cyan bg-cyber-cyan/10 text-cyber-cyan'
+                        : 'border-slate-700 text-slate-300 hover:border-cyber-cyan/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 text-[11px] font-mono font-bold">
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      RESUME &amp; VERIFY
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                      Hash the files on disk, keep what matches, fetch only the missing pieces.
+                    </div>
+                  </button>
+
+                  <button
+                    onClick={() => setAddMode('replace')}
+                    className={`text-left rounded border px-2.5 py-2 transition-colors ${
+                      addMode === 'replace'
+                        ? 'border-cyber-red bg-cyber-red/10 text-cyber-red'
+                        : 'border-slate-700 text-slate-300 hover:border-cyber-red/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 text-[11px] font-mono font-bold">
+                      <Trash2 className="w-3.5 h-3.5" />
+                      START OVER
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                      Delete this torrent&apos;s payload files in that folder, then download all
+                      of it again.
+                    </div>
+                  </button>
+                </div>
+
+                {addMode === 'replace' ? (
+                  <div className="flex items-start gap-1.5 text-[10px] font-mono text-cyber-red">
+                    <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-[1px]" />
+                    <span>
+                      {formatBytes(existing.bytesPresent)} of data will be permanently deleted.
+                      Unrelated files in the folder are kept.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex items-start gap-1.5 text-[10px] font-mono text-cyber-teal/90">
+                    <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0 mt-[1px]" />
+                    <span>
+                      Existing data is verified piece by piece — nothing that already matches is
+                      downloaded again.
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* File List Tree & Checkbox Selector */}
             {preview.files.length > 0 && (
@@ -447,7 +666,7 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
                 <div className="flex items-center justify-between text-xs font-mono">
                   <span className="text-slate-300 font-bold flex items-center gap-1.5">
                     <FileCheck className="w-4 h-4 text-cyber-cyan" />
-                    PAYLOAD FILES ({selectedFiles.length}/{preview.files.length} SELECTED)
+                    PAYLOAD FILES ({selectedFiles.length}/{payloadFiles.length} SELECTED)
                   </span>
                   <div className="flex items-center space-x-2 text-[11px]">
                     <button
@@ -470,21 +689,43 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
                   {preview.files.map((file: TorrentFileItem) => (
                     <div
                       key={file.index}
-                      onClick={() => handleToggleFile(file.index)}
-                      className="px-3 py-2 flex items-center justify-between hover:bg-slate-800/40 cursor-pointer text-xs font-mono transition-colors"
+                      onClick={file.padding ? undefined : () => handleToggleFile(file.index)}
+                      title={
+                        file.padding
+                          ? 'BEP-47 padding file — alignment filler, never written to disk'
+                          : undefined
+                      }
+                      className={`px-3 py-2 flex items-center justify-between text-xs font-mono transition-colors ${
+                        file.padding
+                          ? 'opacity-45 cursor-default'
+                          : 'hover:bg-slate-800/40 cursor-pointer'
+                      }`}
                     >
                       <div className="flex items-center space-x-2.5 truncate max-w-[420px]">
-                        {file.selected ? (
+                        {file.padding ? (
+                          <Square className="w-4 h-4 text-slate-600 flex-shrink-0" />
+                        ) : file.selected ? (
                           <CheckSquare className="w-4 h-4 text-cyber-cyan flex-shrink-0" />
                         ) : (
                           <Square className="w-4 h-4 text-slate-500 flex-shrink-0" />
                         )}
                         <FileCode className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
                         <span
-                          className={`truncate ${file.selected ? 'text-slate-200' : 'text-slate-500'}`}
+                          className={`truncate ${
+                            file.padding
+                              ? 'text-slate-600 line-through'
+                              : file.selected
+                                ? 'text-slate-200'
+                                : 'text-slate-500'
+                          }`}
                         >
                           {file.path || file.name}
                         </span>
+                        {file.padding && (
+                          <span className="text-[9px] font-mono uppercase text-slate-600 flex-shrink-0">
+                            padding
+                          </span>
+                        )}
                       </div>
 
                       <span className="text-[11px] text-slate-400 font-mono flex-shrink-0 ml-2">
@@ -514,6 +755,12 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
               <span>
                 SELECTED PAYLOAD:{' '}
                 <span className="text-cyber-cyan font-bold">{formatBytes(selectedSize)}</span>
+                {folderExists && existing && existing.bytesPresent > 0 && (
+                  <span className="text-cyber-teal">
+                    {' '}
+                    · {formatBytes(existing.bytesPresent)} ALREADY ON DISK
+                  </span>
+                )}
               </span>
             ) : preview ? (
               <span className="text-slate-500">Awaiting metadata from the swarm…</span>
@@ -531,14 +778,34 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
             {preview && (
               <button
                 onClick={() => {
-                  onAddConfirm(preview, downloadDir.trim());
+                  onAddConfirm(preview, downloadDir.trim(), {
+                    // A destructive mode is only ever sent for a report that is still current.
+                    mode: folderExists ? addMode : 'resume',
+                    existing: reportIsCurrent ? existing : null,
+                  });
                   onClose();
                 }}
                 disabled={!canSubmit}
-                title={!downloadDir.trim() ? 'Choose a destination folder first' : undefined}
-                className="cyber-button px-6 py-2 bg-gradient-to-r from-cyber-cyan to-cyber-teal text-black font-bold font-mono text-xs uppercase tracking-wider disabled:opacity-40 shadow-glow-cyan"
+                title={
+                  !downloadDir.trim()
+                    ? 'Choose a destination folder first'
+                    : folderExists && addMode === 'replace'
+                      ? 'Existing payload files in that folder will be deleted first'
+                      : undefined
+                }
+                className={`cyber-button px-6 py-2 font-bold font-mono text-xs uppercase tracking-wider disabled:opacity-40 ${
+                  folderExists && addMode === 'replace'
+                    ? 'bg-gradient-to-r from-cyber-red to-cyber-vermilion text-white shadow-glow-red'
+                    : 'bg-gradient-to-r from-cyber-cyan to-cyber-teal text-black shadow-glow-cyan'
+                }`}
               >
-                ENGAGE SWARM
+                {folderExists
+                  ? addMode === 'replace'
+                    ? 'START OVER'
+                    : existing && existing.bytesPresent > 0
+                      ? 'RESUME & VERIFY'
+                      : 'ENGAGE SWARM'
+                  : 'ENGAGE SWARM'}
               </button>
             )}
           </div>

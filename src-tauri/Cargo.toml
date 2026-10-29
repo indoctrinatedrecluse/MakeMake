@@ -1,6 +1,6 @@
 [package]
 name = "makemake"
-version = "0.1.5"
+version = "0.1.6"
 description = "MakeMake // Rapa Nui Cyberpunk BitTorrent Engine"
 authors = ["Abhishek Mitra (indoctrinatedrecluse)"]
 license = "Apache-2.0"

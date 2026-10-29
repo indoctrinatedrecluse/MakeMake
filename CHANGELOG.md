@@ -4,6 +4,67 @@ All notable changes to **MakeMake // Rapa Nui Cyberpunk BitTorrent Engine** are 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.6] — 2026-10-30
+
+Resume release. Pointing a magnet or `.torrent` at a folder that already holds that torrent's
+payload no longer means starting from zero: MakeMake asks first, then verifies what is on disk and
+downloads only the missing pieces. Plus a hardened crash path and a reworked context menu.
+
+### Added
+- **"This folder already exists" prompt.** The add dialog now asks the engine about the exact
+  folder it would write to (`<download folder>/<torrent name>`) before anything happens, and shows
+  how much of the current selection is already there: bytes on disk versus declared bytes, how many
+  files exist, how many are complete, and how many *unrelated* files share the folder. Two choices:
+  **Resume & Verify** (the default) or **Start Over**. A slow magnet whose metadata has not arrived
+  yet is skipped, because its folder name is not known until the swarm answers.
+- **Resume verifies, it does not re-download.** On resume the payload is left untouched and
+  librqbit's initial hash check adopts every piece that still matches, so a half-finished or
+  previously removed download continues exactly where it stopped. Verified end-to-end with an
+  offline librqbit session: a payload written to disk beforehand is adopted as a complete piece
+  instead of being fetched again.
+- **Start Over is surgical.** It deletes only the paths the torrent itself declares, only regular
+  files, only inside its own folder — never a wildcard, never a directory, never through a symlink,
+  and never outside the folder (a `../` payload path is ignored). Unrelated files are reported and
+  left alone. The engine drops the torrent from the session first so librqbit re-hashes the empty
+  files instead of answering "already managed".
+- **Already-queued swarms are flagged** in the prompt, so re-adding an info hash that is already in
+  the list continues that entry instead of looking like a duplicate.
+- **Crash detection.** A `session-active.marker` file is written when a run starts and removed only
+  after the session has been sealed cleanly. If it is still there at the next launch, the previous
+  run died without pausing its swarms: the restored swarms are re-armed, every `.torrent` archive
+  that is missing or was never confirmed is rewritten from the metadata librqbit restored (the
+  backup vault as a recovery mechanism), and the UI says so once.
+- **Panic hook.** A panic now logs itself and makes a bounded (5 s, separate thread) attempt to
+  pause every swarm and flush resume data. A panic on the UI thread then exits the process, because
+  the event loop cannot recover; a background panic leaves the app running with everything safely
+  paused.
+- **Exit-request sealing.** `RunEvent::ExitRequested` — OS shutdown/logoff, `app.exit()` from
+  anywhere, the last window being destroyed — now runs the same seal as the title-bar close. Until
+  now only `CloseRequested` was covered.
+- **Padding files are marked** (BEP-47) in the file list, cannot be selected, and are excluded from
+  the selection, byte counts and folder inspection.
+
+### Changed
+- **Context menu rework.** Grouped into `Transfer / Storage / Payload / Registry` sections; the
+  priority list and the four clipboard actions (info hash, magnet, path, tracker URLs) are inline
+  expanders instead of separate rows; the panel is measured before it is placed, so the destructive
+  entries can no longer fall off the bottom of the window; it closes on scroll/resize/blur and is
+  keyboard navigable (arrows, Enter, Escape). `Reveal Payload` and `Copy Download Path` now point at
+  the per-torrent folder instead of rebuilding `<dir>/<name>` on top of it.
+- `add_torrent` takes an explicit mode (`resume` / `replace`); anything else is treated as
+  `resume`, so a caller that forgets the argument can never erase data.
+- **A destination report is only actionable while it is current.** Changing the folder (or the
+  file selection) invalidates the previous answer, and a stale answer is discarded instead of
+  offering `Start Over` against a folder the dialog is no longer pointing at.
+
+### Tests
+- Offline librqbit session proving an existing payload is adopted (piece verified from disk, bytes
+  untouched); an end-to-end `resume` vs. `replace` add that shows resume leaves the old bytes alone
+  while start over re-creates them empty and keeps the unrelated file next to them; destination
+  inspection (missing folder, partial payload, foreign files, unresolved magnet); crash-marker
+  lifecycle across a simulated crash and a clean seal; plus the new payload helpers: presence
+  measurement, foreign-entry counting, surgical wipe, and the path-escape refusal.
+
 ## [v0.1.5] — 2026-10-29
 
 Layout release. Every torrent now downloads into a folder of its own, named after the torrent,
@@ -283,5 +344,5 @@ Rust) running a real `librqbit` session — no mocks, no fabricated telemetry.
 - Moving already-downloaded data to a new folder is not implemented yet (re-add with a new target
   folder to re-check in place).
 
-[Unreleased]: https://github.com/indoctrinatedrecluse/MakeMake/compare/v0.1.0...HEAD
-[v0.1.0]: https://github.com/indoctrinatedrecluse/MakeMake/releases/tag/v0.1.0
+[Unreleased]: https://github.com/indoctrinatedrecluse/MakeMake/compare/v0.1.6...HEAD
+[v0.1.6]: https://github.com/indoctrinatedrecluse/MakeMake/releases/tag/v0.1.6

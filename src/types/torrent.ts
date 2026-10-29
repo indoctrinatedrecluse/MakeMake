@@ -4,7 +4,38 @@ export interface TorrentFileItem {
   path: string;
   length: number;
   selected: boolean;
+  /** BEP-47 padding file: never written to disk, cannot be selected. */
+  padding?: boolean;
 }
+
+/**
+ * What already sits in the folder a torrent is about to be written to.
+ *
+ * Every torrent gets its own folder (`<download folder>/<torrent name>`), so an existing
+ * folder means an earlier attempt, a finished copy, or an unrelated folder with the same
+ * name. The add dialog asks before touching it; on resume, the engine verifies the pieces
+ * that are already on disk and only downloads what is missing.
+ */
+export interface ExistingPayload {
+  /** Absolute path of the per-torrent folder. */
+  folder: string;
+  /** The folder already exists on disk. */
+  exists: boolean;
+  filesPresent: number;
+  filesComplete: number;
+  filesTotal: number;
+  /** Bytes of the selection that are already on disk (capped per file). */
+  bytesPresent: number;
+  /** Declared bytes of the selection. */
+  bytesTotal: number;
+  /** Entries in the folder that are not part of this torrent. */
+  foreignFiles: number;
+  /** This info hash is already in the queue. */
+  alreadyManaged: boolean;
+}
+
+/** How an existing destination folder is treated when a torrent is added. */
+export type AddMode = 'resume' | 'replace';
 
 export interface TorrentMetadataPreview {
   name: string;
@@ -136,4 +167,6 @@ export interface SystemStats {
   diskFreeBytes?: number;
   /** Total size of that volume (0 = unknown). */
   diskTotalBytes?: number;
+  /** The previous run ended without sealing its session (crash, power loss, kill). */
+  crashedLastRun?: boolean;
 }

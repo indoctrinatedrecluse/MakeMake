@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OnceCell, RwLock};
 
 use crate::models::{
-    BackupResult, ClientSettings, PeerDetail, SystemStats, TorrentDiskUsage, TorrentFileItem,
-    TorrentItem, TorrentMetadataPreview, TorrentSnapshot,
+    BackupResult, ClientSettings, ExistingPayload, PeerDetail, SystemStats, TorrentDiskUsage,
+    TorrentFileItem, TorrentItem, TorrentMetadataPreview, TorrentSnapshot,
 };
 use crate::sparse;
 
@@ -54,6 +54,16 @@ const PENDING_RESOLVE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// How many times a queued magnet is retried before it is parked with an error.
 const PENDING_RESOLVE_ATTEMPTS: u32 = 3;
+
+/// Marker file written when a run starts and deleted only after the session has been sealed
+/// cleanly. Finding it at launch means the previous run never finished its shutdown
+/// sequence (crash, power loss, "End task"), so the archives are re-verified.
+const CRASH_MARKER_NAME: &str = "session-active.marker";
+
+/// How many unrelated entries are reported for an existing payload folder before the walk
+/// gives up (a folder with millions of entries must not stall the add dialog).
+const FOREIGN_ENTRY_LIMIT: usize = 1000;
+
 
 
 /// Per-torrent data that librqbit does not track itself but the UI needs.
@@ -142,6 +152,7 @@ impl CachedMeta {
                             path: details.filename.to_string(),
                             length: details.len,
                             selected: true,
+                            padding: details.attrs().padding,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -331,6 +342,11 @@ pub struct TorrentEngine {
     pending: Arc<Mutex<HashMap<String, PendingAdd>>>,
     /// Last sampled filesystem numbers for the download volume (see [`DiskSample`]).
     disk: Arc<Mutex<DiskSample>>,
+    /// `session-active.marker`: present for the whole life of a run, removed only after a
+    /// clean seal (see [`TorrentEngine::shutdown`]).
+    crash_marker: Arc<PathBuf>,
+    /// The previous run still had the marker on disk, i.e. it never sealed its session.
+    crashed_last_run: bool,
 }
 
 /// Cached free/total space of the download volume.
@@ -387,6 +403,24 @@ impl TorrentEngine {
             .clone()
             .unwrap_or_else(|| default_settings(&state_dir));
 
+        // Crash detection: the marker exists for exactly as long as a run is unsealed, so a
+        // leftover one means the last run died without pausing its swarms.
+        let crash_marker = state_dir.join(CRASH_MARKER_NAME);
+        let crashed_last_run = crash_marker.is_file();
+        if crashed_last_run {
+            log::warn!(
+                "previous run never sealed its session; resume data will be verified and the \
+                 .torrent archives refreshed"
+            );
+        }
+        if fs::create_dir_all(&state_dir).is_ok() {
+            // Best effort: a read-only config folder must not stop the app from starting.
+            let _ = fs::write(
+                &crash_marker,
+                format!("pid={} started_at={}\n", std::process::id(), now_ms()),
+            );
+        }
+
         // Magnets that were still queued when the app closed come back as queue entries.
         // They are re-attempted once the session is up (see `restore_previous_session`).
         let pending = persisted
@@ -429,7 +463,14 @@ impl TorrentEngine {
             meta_cache: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(pending)),
             disk: Arc::new(Mutex::new(DiskSample::default())),
+            crash_marker: Arc::new(crash_marker),
+            crashed_last_run,
         }
+    }
+
+    /// Did the previous run end without sealing its session?
+    pub fn crashed_last_run(&self) -> bool {
+        self.crashed_last_run
     }
 
     /// `true` the first time it is called, `false` on every later call. Used to make
@@ -533,6 +574,14 @@ impl TorrentEngine {
                 // paused, because MakeMake always sleeps the swarms before exiting).
                 // Re-arm the ones the user had running last time.
                 self.restore_previous_session(&session).await;
+
+                // A run that died without sealing may have left an archive half-written or
+                // missing entirely (the vault is written on a timer). The `.torrent` bytes
+                // are the one piece of state that cannot be recovered from the payload, so
+                // they are re-checked before anything else happens.
+                if self.crashed_last_run {
+                    self.refresh_archives(&session).await;
+                }
 
                 Ok(session)
             })
@@ -815,8 +864,17 @@ impl TorrentEngine {
 
             if failures > 0 {
                 log::warn!("{failures} torrent(s) could not be paused cleanly");
+            } else {
+                // Only a fully sealed run may drop the marker: if even one swarm could not be
+                // parked, the next launch has to know the session ended abruptly.
+                if let Err(err) = fs::remove_file(self.crash_marker.as_path()) {
+                    log::warn!("cannot clear the session marker: {err}");
+                }
             }
             log::info!("session sealed; all swarms dormant");
+        } else {
+            // No session was ever created: nothing to pause, nothing to recover.
+            let _ = fs::remove_file(self.crash_marker.as_path());
         }
 
         self.persist_state().await;
@@ -1021,6 +1079,7 @@ impl TorrentEngine {
             restored_torrents: self.restored.load(Ordering::SeqCst),
             resumed_torrents: self.resumed.load(Ordering::SeqCst),
             checkpoint_at: self.checkpoint_at.load(Ordering::SeqCst),
+            crashed_last_run: self.crashed_last_run,
             ..Default::default()
         };
 
@@ -1172,6 +1231,7 @@ impl TorrentEngine {
             restored_torrents: self.restored.load(Ordering::SeqCst),
             resumed_torrents: self.resumed.load(Ordering::SeqCst),
             checkpoint_at: self.checkpoint_at.load(Ordering::SeqCst),
+            crashed_last_run: self.crashed_last_run,
             ..Default::default()
         };
 
@@ -1203,10 +1263,20 @@ impl TorrentEngine {
     /// librqbit straight away. A magnet without metadata is parked in the pending queue and
     /// resolved in the background, so it appears in the UI immediately — and keeps retrying
     /// instead of silently disappearing when the swarm is slow.
+    ///
+    /// `mode` decides what happens to a payload folder that already exists:
+    ///
+    /// * `"resume"` (default) — keep everything, let librqbit hash what is on disk and only
+    ///   fetch the pieces that are missing;
+    /// * `"replace"` — delete the torrent's own payload paths first, then start from zero.
+    ///
+    /// Anything else (or nothing) is treated as `"resume"`, the non-destructive choice: a
+    /// torrent can never erase files because a caller forgot an argument.
     pub async fn add_torrent(
         &self,
         preview: TorrentMetadataPreview,
         target_dir: String,
+        mode: Option<String>,
     ) -> Result<TorrentItem, String> {
         let session = self.session().await?;
         let settings = self.settings.read().await.clone();
@@ -1215,12 +1285,20 @@ impl TorrentEngine {
         // but never let an empty value reach librqbit.
         let base_dir = resolve_download_dir(&settings, Some(&target_dir))?;
         let only_files = selected_indices(&preview)?;
+        let start_over = matches!(
+            mode.as_deref().map(str::trim),
+            Some("replace") | Some("startOver") | Some("fresh")
+        );
 
         match preview.raw_bencode_base64.as_deref() {
             Some(encoded) => {
                 let bytes = BASE64
                     .decode(encoded.trim())
                     .map_err(|e| format!("invalid .torrent payload: {e}"))?;
+                if start_over {
+                    self.wipe_existing_payload(&session, &bytes, &base_dir)
+                        .await?;
+                }
                 self.add_resolved(
                     &session,
                     &bytes,
@@ -1235,11 +1313,152 @@ impl TorrentEngine {
                     "torrent payload is missing both raw metadata and a magnet URI".to_string()
                 })?;
 
+                if start_over {
+                    // Without metadata there is no payload path to erase, and wiping the whole
+                    // folder instead would be a data-loss bug: refuse rather than guess.
+                    log::warn!(
+                        "ignoring \"start over\" for {}: its metadata is not resolved yet",
+                        short_hash(&preview.info_hash)
+                    );
+                }
+
                 Ok(self
                     .enqueue_pending(preview.name, preview.info_hash, uri, base_dir, only_files)
                     .await)
             }
         }
+    }
+
+    /// Erase an existing payload folder's files so a torrent can start from zero.
+    ///
+    /// Only the paths the torrent itself declares are removed (see
+    /// [`crate::sparse::wipe_payload`]); unrelated files in the folder are left alone. A
+    /// torrent that is already managed is dropped from the session first, otherwise librqbit
+    /// would answer "already managed" and never re-check the now-empty files.
+    async fn wipe_existing_payload(
+        &self,
+        session: &Arc<Session>,
+        torrent_bytes: &[u8],
+        base_dir: &Path,
+    ) -> Result<(), String> {
+        let layout = payload_layout(torrent_bytes, base_dir)?;
+        let info_hash = layout.info_hash.clone();
+
+        if let Some((id, _handle)) = Self::find_handle(session, &info_hash) {
+            session
+                .delete(TorrentIdOrHash::Id(id), false)
+                .await
+                .map_err(|e| format!("cannot reset torrent {}: {e}", short_hash(&info_hash)))?;
+            self.pending_rearm.lock().await.remove(&info_hash);
+        }
+
+        let output_dir = layout.output_dir.clone();
+        let files = layout.all_files.clone();
+        // Deleting thousands of files is blocking work; it must not park a runtime worker.
+        match tokio::task::spawn_blocking(move || sparse::wipe_payload(&output_dir, &files)).await {
+            Ok(Ok(removed)) => log::info!(
+                "start over for {}: removed {removed} payload file(s) from {}",
+                short_hash(&info_hash),
+                layout.output_dir.display()
+            ),
+            Ok(Err(err)) => {
+                return Err(format!(
+                    "cannot clear the existing payload in {}: {err}",
+                    layout.output_dir.display()
+                ))
+            }
+            Err(err) => return Err(format!("cannot clear the existing payload: {err}")),
+        }
+
+        Ok(())
+    }
+
+    /// Inspect the folder this torrent would be written to, without touching anything.
+    ///
+    /// Returns `None` when the payload paths are not known yet (a magnet whose metadata has
+    /// not arrived), because the folder name itself comes from that metadata. Otherwise it
+    /// reports how much of the selection is already on disk, so the add dialog can ask before
+    /// resuming into — or replacing — an existing folder.
+    pub async fn inspect_destination(
+        &self,
+        preview: &TorrentMetadataPreview,
+        target_dir: &str,
+    ) -> Result<Option<ExistingPayload>, String> {
+        let Some(encoded) = preview.raw_bencode_base64.as_deref() else {
+            return Ok(None);
+        };
+        let bytes = BASE64
+            .decode(encoded.trim())
+            .map_err(|e| format!("invalid .torrent payload: {e}"))?;
+
+        let settings = self.settings.read().await.clone();
+        // Deliberately not `resolve_download_dir`: inspecting a destination must never create
+        // it (a cancelled add should leave the disk untouched).
+        let base_dir = download_base_dir(&settings, Some(target_dir));
+        let layout = payload_layout(&bytes, &base_dir)?;
+
+        let selected = selected_indices(preview)?;
+        let selection: Vec<(PathBuf, u64)> = layout
+            .indexed_files
+            .iter()
+            .filter(|(index, _, _)| {
+                selected
+                    .as_ref()
+                    .map(|chosen| chosen.contains(index))
+                    .unwrap_or(true)
+            })
+            .map(|(_, path, length)| (path.clone(), *length))
+            .collect();
+
+        let already_managed = self.pending.lock().await.contains_key(&layout.info_hash)
+            || self
+                .session
+                .get()
+                .map(|session| Self::find_handle(session, &layout.info_hash).is_some())
+                .unwrap_or(false);
+
+        let folder = layout.output_dir.clone();
+        let all_files = layout.all_files.clone();
+        let exists = folder.is_dir();
+        let files_total = selection.len();
+        let bytes_total: u64 = selection.iter().map(|(_, length)| *length).sum();
+
+        // Two filesystem passes (one stat per file, one bounded tree walk): blocking work on
+        // a large pack, so it never runs on the runtime.
+        let (presence, foreign_files) = tokio::task::spawn_blocking(move || {
+            if !exists {
+                return (sparse::PayloadPresence::default(), 0usize);
+            }
+            let presence = sparse::measure_presence(&folder, &selection);
+            let foreign = sparse::count_foreign_entries(&folder, &all_files, FOREIGN_ENTRY_LIMIT);
+            (presence, foreign)
+        })
+        .await
+        .map_err(|e| format!("cannot inspect the destination folder: {e}"))?;
+
+        // A destination that does not exist yet still has a known size, so the dialog can say
+        // "0 of 4.2 GB on disk" instead of nothing at all.
+        let presence = if exists {
+            presence
+        } else {
+            sparse::PayloadPresence {
+                files_total,
+                bytes_total,
+                ..Default::default()
+            }
+        };
+
+        Ok(Some(ExistingPayload {
+            folder: layout.output_dir.to_string_lossy().to_string(),
+            exists,
+            files_present: presence.files_present,
+            files_complete: presence.files_complete,
+            files_total: presence.files_total,
+            bytes_present: presence.bytes_present,
+            bytes_total: presence.bytes_total,
+            foreign_files,
+            already_managed,
+        }))
     }
 
     /// Register a magnet that still has to resolve its metadata.
@@ -1422,23 +1641,16 @@ impl TorrentEngine {
         base_dir: &Path,
         only_files: Option<Vec<usize>>,
     ) -> Result<TorrentItem, String> {
-        let parsed = torrent_from_bytes(torrent_bytes)
-            .map_err(|e| format!("invalid .torrent payload: {e}"))?;
-        let info = parsed
-            .info
-            .data
-            .validate()
-            .map_err(|e| format!("torrent metadata is invalid: {e}"))?;
-        let info_hash = parsed.info_hash.as_string();
-        let name = info
-            .name_or_else(|| format!("Torrent {}", short_hash(&info_hash)))
-            .into_owned();
-
-        // Every torrent is written into its own folder, named after the torrent itself, so a
-        // payload never lands loose in the download folder next to other torrents (or the
-        // user's own files). See [`payload_dir`].
-        let payload = payload_files(&info, None);
-        let output_dir = payload_dir(base_dir, &name, &payload);
+        // The exact same layout the add dialog inspected (see [`payload_layout`]), so the
+        // "this folder already exists" question and the actual write target can never drift.
+        let layout = payload_layout(torrent_bytes, base_dir)?;
+        let PayloadLayout {
+            info_hash,
+            output_dir,
+            all_files: payload,
+            total_bytes,
+            ..
+        } = layout;
         fs::create_dir_all(&output_dir)
             .map_err(|e| format!("cannot create {}: {e}", output_dir.display()))?;
 
@@ -1446,7 +1658,6 @@ impl TorrentEngine {
         // initialisation extends *all* of a torrent's files (measured on a restored
         // 133 GiB torrent, files outside `only_files` were extended too), and any file that
         // is not already sparse gets allocated densely.
-        let total_bytes = info.lengths().total_length();
 
         // Pre-creation is pure blocking filesystem work (one open + one ioctl per file), so
         // it must not run on a runtime worker thread: a 20 000-file pack would stall every
@@ -1891,6 +2102,58 @@ impl TorrentEngine {
         })
     }
 
+    /// Re-create the `.torrent` archives that are missing or unconfirmed.
+    ///
+    /// Used on the launch that follows an unclean exit: the archive vault is written on a
+    /// timer, so a crash can happen between "metadata known" and "archive on disk". The
+    /// payload is recoverable (librqbit re-hashes it), but the `.torrent` bytes are not —
+    /// without them a torrent could not be re-added from scratch.
+    ///
+    /// The session is passed in rather than read from the cell: this runs *during* the cell's
+    /// initialisation, where `self.session.get()` would still be empty.
+    async fn refresh_archives(&self, session: &Arc<Session>) {
+        let handles = Self::handles(session);
+        if handles.is_empty() {
+            return;
+        }
+
+        let settings = self.settings.read().await.clone();
+        let mut written = 0usize;
+
+        for handle in handles {
+            let info_hash = handle.info_hash().as_string();
+            let (recorded, path) = {
+                let guard = self.extras.lock().await;
+                guard
+                    .get(&info_hash)
+                    .map(|extras| (extras.backed_up, extras.backup_path.clone()))
+                    .unwrap_or((false, None))
+            };
+            let still_on_disk = path
+                .as_deref()
+                .map(|path| Path::new(path).is_file())
+                .unwrap_or(false);
+            if recorded && still_on_disk {
+                continue;
+            }
+
+            let Some(archive) = self.write_backup_file(&handle, &settings).await else {
+                continue;
+            };
+            let mut guard = self.extras.lock().await;
+            let extras = guard.entry(info_hash).or_default();
+            extras.backed_up = true;
+            extras.backup_path = Some(archive);
+            extras.last_backup_at = now_ms();
+            written += 1;
+        }
+
+        if written > 0 {
+            log::info!("crash recovery: re-wrote {written} .torrent archive(s)");
+        }
+        self.persist_state().await;
+    }
+
     /// Write the torrent's raw metadata (`.torrent` bytes — synthesized bencode when the
     /// torrent was added from a magnet link) into the archive vault.
     async fn write_backup_file(
@@ -2277,7 +2540,24 @@ fn resolve_download_dir(
     settings: &ClientSettings,
     requested: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let candidate = requested
+    let candidate = download_base_dir(settings, requested);
+
+    fs::create_dir_all(&candidate).map_err(|e| {
+        format!(
+            "cannot create download directory {}: {e}",
+            candidate.display()
+        )
+    })?;
+    Ok(candidate)
+}
+
+/// The folder a torrent's payload folder is created in, without touching the disk.
+///
+/// Same priority as [`resolve_download_dir`] (explicit choice → configured default → OS
+/// downloads folder) but side-effect free, so the add dialog can inspect a destination
+/// before the user has committed to it.
+fn download_base_dir(settings: &ClientSettings, requested: Option<&str>) -> PathBuf {
+    requested
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -2290,15 +2570,7 @@ fn resolve_download_dir(
             }
         })
         .or_else(|| dirs::download_dir().map(|dir| dir.join("MakeMake")))
-        .unwrap_or_else(|| std::env::temp_dir().join("MakeMakeDownloads"));
-
-    fs::create_dir_all(&candidate).map_err(|e| {
-        format!(
-            "cannot create download directory {}: {e}",
-            candidate.display()
-        )
-    })?;
-    Ok(candidate)
+        .unwrap_or_else(|| std::env::temp_dir().join("MakeMakeDownloads"))
 }
 
 fn state_file_path(state_dir: &Path) -> PathBuf {
@@ -2385,6 +2657,65 @@ fn payload_dir(base_dir: &Path, name: &str, payload: &[(PathBuf, u64)]) -> PathB
     }
 }
 
+/// Everything needed to place one torrent's payload on disk.
+///
+/// Computed in exactly one place so the add dialog's "this folder already exists" question
+/// and the actual write target can never disagree.
+struct PayloadLayout {
+    info_hash: String,
+    /// `<download folder>/<torrent name>` (or the download folder itself for payloads that
+    /// already nest inside a folder of the same name — see [`payload_dir`]).
+    output_dir: PathBuf,
+    /// Non-padding files, in torrent order, with their declared lengths.
+    all_files: Vec<(PathBuf, u64)>,
+    /// The same files, keeping the file index that `only_files` refers to.
+    indexed_files: Vec<(usize, PathBuf, u64)>,
+    /// Sum of every file's declared length (padding included), i.e. the torrent size.
+    total_bytes: u64,
+}
+
+/// Resolve a torrent's payload layout against `base_dir`.
+///
+/// Fails only when the metadata itself is unusable (corrupt bencode, invalid info dict).
+fn payload_layout(torrent_bytes: &[u8], base_dir: &Path) -> Result<PayloadLayout, String> {
+    let parsed = torrent_from_bytes(torrent_bytes)
+        .map_err(|e| format!("invalid .torrent payload: {e}"))?;
+    let info = parsed
+        .info
+        .data
+        .validate()
+        .map_err(|e| format!("torrent metadata is invalid: {e}"))?;
+    let info_hash = parsed.info_hash.as_string();
+    let name = info
+        .name_or_else(|| format!("Torrent {}", short_hash(&info_hash)))
+        .into_owned();
+
+    let indexed_files: Vec<(usize, PathBuf, u64)> = info
+        .iter_file_details()
+        .enumerate()
+        .filter(|(_, details)| !details.attrs().padding)
+        .map(|(index, details)| (index, details.filename.to_pathbuf(), details.len))
+        .collect();
+    let all_files: Vec<(PathBuf, u64)> = indexed_files
+        .iter()
+        .map(|(_, path, length)| (path.clone(), *length))
+        .collect();
+
+    // Every torrent is written into its own folder, named after the torrent itself, so a
+    // payload never lands loose in the download folder next to other torrents (or the user's
+    // own files). See [`payload_dir`].
+    let output_dir = payload_dir(base_dir, &name, &all_files);
+    let total_bytes = info.lengths().total_length();
+
+    Ok(PayloadLayout {
+        info_hash,
+        output_dir,
+        all_files,
+        indexed_files,
+        total_bytes,
+    })
+}
+
 fn default_settings(state_dir: &Path) -> ClientSettings {
     let default_download = dirs::download_dir()
         .map(|p| p.join("MakeMake"))
@@ -2453,13 +2784,15 @@ fn payload_files<B: AsRef<[u8]>>(
 /// `None` means "everything"; an empty selection is a user error and is rejected here
 /// rather than producing a torrent that can never finish.
 fn selected_indices(preview: &TorrentMetadataPreview) -> Result<Option<Vec<usize>>, String> {
-    if preview.files.is_empty() {
+    // Padding files are never written to disk, so they are not part of the decision.
+    let payload: Vec<&TorrentFileItem> = preview.files.iter().filter(|file| !file.padding).collect();
+
+    if payload.is_empty() {
         // Magnet whose metadata has not arrived yet: everything will be downloaded.
         return Ok(None);
     }
 
-    let selected: Vec<usize> = preview
-        .files
+    let selected: Vec<usize> = payload
         .iter()
         .filter(|file| file.selected)
         .map(|file| file.index)
@@ -2469,7 +2802,7 @@ fn selected_indices(preview: &TorrentMetadataPreview) -> Result<Option<Vec<usize
         return Err("no files selected for download".to_string());
     }
 
-    if selected.len() == preview.files.len() {
+    if selected.len() == payload.len() {
         Ok(None)
     } else {
         Ok(Some(selected))
@@ -2503,6 +2836,7 @@ fn preview_from_info<B: AsRef<[u8]>>(
                 path: details.filename.to_string(),
                 length: details.len,
                 selected: true,
+                padding: details.attrs().padding,
             }
         })
         .collect();
@@ -3240,6 +3574,7 @@ mod tests {
             path: format!("file-{index}.bin"),
             length: 1,
             selected,
+            padding: false,
         };
         let mut preview = TorrentMetadataPreview {
             name: "payload".to_string(),
@@ -3320,5 +3655,252 @@ mod tests {
         assert!(settings.seed_after_complete);
         assert!(settings.turtle_download_speed > 0);
         assert!(settings.always_ask_download_dir);
+    }
+
+    /// Single-file torrent whose only piece hash is `piece_hash` (so it can be matched
+    /// against real bytes written to disk).
+    fn torrent_with_piece_hash(name: &str, length: u64, piece_hash: &[u8; 20]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"d4:infod6:lengthi");
+        bytes.extend_from_slice(length.to_string().as_bytes());
+        bytes.extend_from_slice(
+            format!("e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).as_bytes(),
+        );
+        bytes.extend_from_slice(piece_hash);
+        bytes.extend_from_slice(b"ee");
+        bytes
+    }
+
+    /// The whole point of the existing-folder prompt: data that is already on disk is
+    /// verified and kept, only the missing pieces are fetched.
+    #[tokio::test]
+    async fn existing_payload_is_adopted_instead_of_re_downloaded() {
+        // SHA-1 of b"hello world".
+        const PIECE_HASH: [u8; 20] = [
+            0x2a, 0xae, 0x6c, 0x35, 0xc9, 0x4f, 0xcf, 0xb4, 0x15, 0xdb, 0xe9, 0x5f, 0x40, 0x8b,
+            0x9c, 0xe9, 0x1e, 0xe8, 0x46, 0xed,
+        ];
+        const PAYLOAD: &[u8] = b"hello world";
+
+        let root = std::env::temp_dir().join(format!("makemake-resume-{}", std::process::id()));
+        let base = root.join("downloads");
+        let payload = base.join("resume.bin").join("resume.bin");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, PAYLOAD).unwrap();
+
+        let bytes = torrent_with_piece_hash("resume.bin", PAYLOAD.len() as u64, &PIECE_HASH);
+        let session = Session::new_with_opts(
+            base.clone(),
+            SessionOptions {
+                dht: None,
+                persistence: None,
+                listen: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("offline session should start");
+
+        // Exactly what `add_resolved` does: the per-torrent folder as output, overwrite on.
+        let response = session
+            .add_torrent(
+                AddTorrent::from_bytes(bytes),
+                Some(AddTorrentOptions {
+                    paused: true,
+                    overwrite: true,
+                    output_folder: Some(base.join("resume.bin").to_string_lossy().to_string()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("torrent should be added over the existing payload");
+        let handle = match response {
+            AddTorrentResponse::Added(_, handle)
+            | AddTorrentResponse::AlreadyManaged(_, handle) => handle,
+            _ => panic!("expected the torrent to be added"),
+        };
+
+        // The existing-file hash check runs asynchronously.
+        let mut stats = handle.stats();
+        for _ in 0..100 {
+            if stats.progress_bytes >= PAYLOAD.len() as u64 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stats = handle.stats();
+        }
+
+        assert_eq!(
+            stats.progress_bytes,
+            PAYLOAD.len() as u64,
+            "the piece already on disk must be adopted, not downloaded again"
+        );
+        assert!(stats.finished, "a fully present payload verifies as complete");
+        assert_eq!(
+            fs::read(&payload).unwrap(),
+            PAYLOAD,
+            "resuming must never rewrite the payload"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The add dialog's pre-flight: what exists, how much of it is usable, and what else is
+    /// in the folder.
+    #[tokio::test]
+    async fn inspect_destination_reports_the_existing_folder() {
+        let root = std::env::temp_dir().join(format!("makemake-inspect-{}", std::process::id()));
+        let base = root.join("downloads");
+        fs::remove_dir_all(&root).ok();
+
+        let engine = TorrentEngine::with_state_dir(root.join("state"));
+        let bytes = multi_file_torrent_bencode();
+        let preview = TorrentEngine::parse_torrent_file("pack.torrent", &BASE64.encode(&bytes))
+            .expect("sample must parse");
+
+        // Nothing there yet — and inspecting must not create anything.
+        let absent = engine
+            .inspect_destination(&preview, &base.to_string_lossy())
+            .await
+            .expect("inspection must succeed")
+            .expect("a parsed torrent always has a destination");
+        assert_eq!(absent.folder, base.join("dir").to_string_lossy());
+        assert!(!absent.exists);
+        assert_eq!(absent.files_total, 2, "the padding file is not payload");
+        assert_eq!(absent.files_present, 0);
+        assert!(!base.exists(), "inspecting a destination must be read-only");
+
+        // One complete file, one partial, plus an unrelated file.
+        let folder = base.join("dir");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("a.txt"), vec![0u8; 5]).unwrap();
+        fs::write(folder.join("c.txt"), vec![0u8; 3]).unwrap();
+        fs::write(folder.join("notes.txt"), b"mine").unwrap();
+
+        let report = engine
+            .inspect_destination(&preview, &base.to_string_lossy())
+            .await
+            .expect("inspection must succeed")
+            .expect("a parsed torrent always has a destination");
+        assert!(report.exists);
+        assert_eq!(report.files_total, 2);
+        assert_eq!(report.files_present, 2);
+        assert_eq!(report.files_complete, 1);
+        assert_eq!(report.bytes_total, 14, "5 + 9 payload bytes");
+        assert_eq!(report.bytes_present, 8, "5 complete + 3 partial");
+        assert_eq!(report.foreign_files, 1);
+        assert!(!report.already_managed);
+
+        // An unresolved magnet has no payload paths, so there is nothing to inspect.
+        let magnet = TorrentMetadataPreview {
+            name: "magnet".to_string(),
+            info_hash: "00".repeat(20),
+            total_size: 0,
+            piece_length: 0,
+            piece_count: 0,
+            files: Vec::new(),
+            is_magnet: true,
+            magnet_uri: Some("magnet:?xt=urn:btih:".to_string()),
+            raw_bencode_base64: None,
+        };
+        assert!(engine
+            .inspect_destination(&magnet, &base.to_string_lossy())
+            .await
+            .expect("inspection must not fail")
+            .is_none());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// "Start over" erases the torrent's own payload and nothing else, and "resume" never
+    /// touches a byte.
+    #[tokio::test]
+    async fn add_mode_resume_keeps_files_and_start_over_erases_only_the_payload() {
+        let root = std::env::temp_dir().join(format!("makemake-mode-{}", std::process::id()));
+        let base = root.join("downloads");
+        let folder = base.join("dir");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("a.txt"), b"stale").unwrap();
+        fs::write(folder.join("keep.txt"), b"mine").unwrap();
+
+        let engine = TorrentEngine::with_state_dir(root.join("state"));
+        // Keep the engine's default folder inside the sandbox (the session reads it too).
+        let mut settings = engine.get_settings().await;
+        settings.default_download_dir = base.to_string_lossy().to_string();
+        engine.update_settings(settings).await;
+
+        let session = Session::new_with_opts(
+            base.clone(),
+            SessionOptions {
+                dht: None,
+                persistence: None,
+                listen: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("offline session should start");
+        engine.session.set(session).ok();
+
+        let bytes = multi_file_torrent_bencode();
+        let preview = TorrentEngine::parse_torrent_file("pack.torrent", &BASE64.encode(&bytes))
+            .expect("sample must parse");
+        let target = base.to_string_lossy().to_string();
+
+        // Resume: the stale payload is left exactly as it is (librqbit re-hashes it later).
+        engine
+            .add_torrent(preview.clone(), target.clone(), Some("resume".to_string()))
+            .await
+            .expect("resume add should succeed");
+        assert_eq!(fs::read(folder.join("a.txt")).unwrap(), b"stale");
+
+        // Start over: the declared payload is gone, the unrelated file is not.
+        engine
+            .add_torrent(preview, target, Some("replace".to_string()))
+            .await
+            .expect("start-over add should succeed");
+
+        let payload = fs::read(folder.join("a.txt")).unwrap();
+        assert_ne!(payload, b"stale", "start over must erase the old bytes");
+        assert!(
+            payload.iter().all(|byte| *byte == 0),
+            "the payload is re-created as a sparse placeholder, not with old data"
+        );
+        assert_eq!(
+            fs::read(folder.join("keep.txt")).unwrap(),
+            b"mine",
+            "files that are not part of the torrent must survive"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The run marker is what tells the next launch that the previous one crashed.
+    #[tokio::test]
+    async fn the_crash_marker_survives_a_crash_and_clears_on_a_clean_seal() {
+        let root = std::env::temp_dir().join(format!("makemake-marker-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+
+        let engine = TorrentEngine::with_state_dir(root.clone());
+        assert!(!engine.crashed_last_run(), "a first run has nothing to recover");
+        assert!(
+            root.join(CRASH_MARKER_NAME).is_file(),
+            "the marker must be armed while the app runs"
+        );
+
+        // A second engine on the same state dir sees the marker: the first run "crashed".
+        let crashed = TorrentEngine::with_state_dir(root.clone());
+        assert!(crashed.crashed_last_run());
+
+        // A clean seal removes it again.
+        engine.shutdown().await.expect("shutdown must succeed");
+        assert!(
+            !root.join(CRASH_MARKER_NAME).exists(),
+            "a sealed run must clear its marker"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 }

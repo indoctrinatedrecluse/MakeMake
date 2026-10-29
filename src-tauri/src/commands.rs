@@ -3,8 +3,8 @@ use std::process::Command;
 
 use crate::engine::TorrentEngine;
 use crate::models::{
-    BackupResult, ClientSettings, PeerDetail, SystemStats, TorrentDiskUsage, TorrentItem,
-    TorrentMetadataPreview, TorrentSnapshot,
+    BackupResult, ClientSettings, ExistingPayload, PeerDetail, SystemStats, TorrentDiskUsage,
+    TorrentItem, TorrentMetadataPreview, TorrentSnapshot,
 };
 
 #[tauri::command]
@@ -73,9 +73,22 @@ pub async fn delete_torrent(
 pub async fn add_torrent(
     preview: TorrentMetadataPreview,
     target_dir: String,
+    mode: Option<String>,
     engine: State<'_, TorrentEngine>,
 ) -> Result<TorrentItem, String> {
-    engine.add_torrent(preview, target_dir).await
+    engine.add_torrent(preview, target_dir, mode).await
+}
+
+/// Pre-flight for the add dialog: does the per-torrent folder already exist, and how much of
+/// the selection is already on disk? `None` when the metadata (and therefore the folder name)
+/// is not known yet.
+#[tauri::command]
+pub async fn inspect_destination(
+    preview: TorrentMetadataPreview,
+    target_dir: String,
+    engine: State<'_, TorrentEngine>,
+) -> Result<Option<ExistingPayload>, String> {
+    engine.inspect_destination(&preview, &target_dir).await
 }
 
 #[tauri::command]

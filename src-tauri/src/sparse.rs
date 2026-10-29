@@ -25,7 +25,7 @@
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use fs4::FileExt as _;
 
@@ -171,6 +171,191 @@ fn allocated_size(path: &Path) -> io::Result<u64> {
     file.allocated_size()
 }
 
+/// How much of a torrent's payload already sits in its output folder.
+///
+/// This is the cheap, metadata-only half of "resume instead of restart": each declared file
+/// is `stat`ed and compared with its expected length. Nothing is hashed here — librqbit does
+/// the real verification (SHA-1 per piece) when the torrent is added, and only downloads the
+/// pieces it cannot find.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PayloadPresence {
+    /// Payload files in the current selection.
+    pub files_total: usize,
+    /// Files that exist on disk.
+    pub files_present: usize,
+    /// Files that already have their full declared length.
+    pub files_complete: usize,
+    /// Declared bytes of the whole selection.
+    pub bytes_total: u64,
+    /// Bytes that exist on disk, capped at each file's declared length.
+    pub bytes_present: u64,
+}
+
+impl PayloadPresence {
+    /// Every selected byte is already on disk (a verify still has to confirm the content).
+    #[cfg(test)]
+    pub fn is_complete(&self) -> bool {
+        self.bytes_total > 0 && self.bytes_present >= self.bytes_total
+    }
+}
+
+/// Stat every payload file of `files` (relative path + declared length) under `output_dir`.
+///
+/// Blocking: one metadata query per payload file, so callers on the async runtime should run
+/// it inside [`tokio::task::spawn_blocking`] — a 20 000-file pack would otherwise stall the
+/// UI polls for the duration.
+pub fn measure_presence(output_dir: &Path, files: &[(PathBuf, u64)]) -> PayloadPresence {
+    let mut presence = PayloadPresence::default();
+
+    for (relative, declared) in files {
+        presence.files_total += 1;
+        presence.bytes_total += *declared;
+
+        let Ok(meta) = fs::metadata(output_dir.join(relative)) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+
+        presence.files_present += 1;
+        if meta.len() >= *declared {
+            presence.files_complete += 1;
+        }
+        presence.bytes_present += meta.len().min(*declared);
+    }
+
+    presence
+}
+
+/// Count the entries inside `output_dir` that are **not** part of `payload`.
+///
+/// A folder that already exists may hold an unrelated previous download, the user's own
+/// files, or leftovers from a different release of the same torrent. The add dialog reports
+/// this so "resume" is never a blind decision; resuming never touches those files. The walk
+/// stops after `limit` hits so a folder with a million entries cannot stall the dialog.
+pub fn count_foreign_entries(output_dir: &Path, payload: &[(PathBuf, u64)], limit: usize) -> usize {
+    let known: HashSet<&Path> = payload.iter().map(|(path, _)| path.as_path()).collect();
+    let mut foreign = 0usize;
+    let mut pending: Vec<PathBuf> = vec![PathBuf::new()];
+
+    while let Some(relative_dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(output_dir.join(&relative_dir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let relative = relative_dir.join(entry.file_name());
+            if file_type.is_dir() {
+                pending.push(relative);
+                continue;
+            }
+            if !known.contains(relative.as_path()) {
+                foreign += 1;
+                if foreign >= limit {
+                    return foreign;
+                }
+            }
+        }
+    }
+
+    foreign
+}
+
+/// Delete this torrent's payload files so the download can start from zero.
+///
+/// "Start over" is the only destructive option of the existing-folder prompt, so it is kept
+/// as narrow as possible:
+///
+/// * only the paths declared by the torrent metadata are considered — never the whole
+///   folder, never a wildcard;
+/// * only regular files inside `output_dir` are removed (directories, symlinks and reparse
+///   points are left alone, so a hostile torrent cannot be used to delete something else);
+/// * directories that end up empty are pruned, but `output_dir` itself always stays.
+///
+/// Returns how many files were actually removed.
+pub fn wipe_payload(output_dir: &Path, files: &[(PathBuf, u64)]) -> io::Result<usize> {
+    if !output_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    let mut touched_dirs: Vec<PathBuf> = Vec::new();
+
+    for (relative, _length) in files {
+        let target = output_dir.join(relative);
+        if !is_safe_child(output_dir, &target) {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&target) else {
+            continue;
+        };
+        let file_type = meta.file_type();
+        if !file_type.is_file() || file_type.is_symlink() {
+            // A directory (or a link) on a payload path is not ours to delete.
+            continue;
+        }
+
+        match fs::remove_file(&target) {
+            Ok(()) => {
+                removed += 1;
+                if let Some(parent) = target.parent() {
+                    touched_dirs.push(parent.to_path_buf());
+                }
+            }
+            // Already gone: nothing to do.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    // Deepest first, so `pack/disc1` can be pruned once its files are gone.
+    touched_dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    touched_dirs.dedup();
+    for dir in touched_dirs {
+        prune_empty_dirs(output_dir, dir);
+    }
+
+    Ok(removed)
+}
+
+/// Remove `dir` and its now-empty ancestors, stopping at (and never deleting) `root`.
+fn prune_empty_dirs(root: &Path, dir: PathBuf) {
+    let mut current = dir;
+    while current != root && current.starts_with(root) {
+        if fs::remove_dir(&current).is_err() {
+            // Not empty (or not removable): its parents are not empty either.
+            break;
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => break,
+        }
+    }
+}
+
+/// Is `candidate` a path strictly inside `root`, with no `..` escape?
+///
+/// Metadata that comes from a torrent file is validated by librqbit, but this is the one
+/// place where a malformed path would translate into `remove_file`, so it is checked again.
+fn is_safe_child(root: &Path, candidate: &Path) -> bool {
+    let Ok(relative) = candidate.strip_prefix(root) else {
+        return false;
+    };
+
+    let mut depth = 0usize;
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => depth += 1,
+            // `..`, a root, a drive prefix or `.` is never a legitimate payload component.
+            _ => return false,
+        }
+    }
+    depth > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +475,112 @@ mod tests {
         assert_eq!(summary.files, 3);
         assert!(root.join("pack/disc1/a.bin").is_file());
         assert!(root.join("pack/disc2/c.bin").is_file());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The pre-flight that decides whether the add dialog has to ask about an existing
+    /// folder: missing, partial and complete files must be told apart.
+    #[test]
+    fn presence_separates_missing_partial_and_complete_files() {
+        let root = std::env::temp_dir().join(format!("makemake-presence-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).unwrap();
+
+        fs::write(root.join("done.bin"), vec![1u8; 10]).unwrap();
+        fs::write(root.join("half.bin"), vec![1u8; 4]).unwrap();
+
+        let files = vec![
+            (PathBuf::from("done.bin"), 10u64),
+            (PathBuf::from("half.bin"), 10u64),
+            (PathBuf::from("missing.bin"), 10u64),
+        ];
+
+        let presence = measure_presence(&root, &files);
+        assert_eq!(presence.files_total, 3);
+        assert_eq!(presence.files_present, 2);
+        assert_eq!(presence.files_complete, 1);
+        assert_eq!(presence.bytes_total, 30);
+        // 10 from the complete file, 4 from the truncated one — never more than declared.
+        assert_eq!(presence.bytes_present, 14);
+        assert!(!presence.is_complete());
+
+        // Nothing exists yet: the common case gets a zeroed answer, not an error.
+        let absent = measure_presence(&root.join("nope"), &files);
+        assert_eq!(absent.files_present, 0);
+        assert_eq!(absent.bytes_present, 0);
+        assert_eq!(absent.files_total, 3);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A folder that already exists may hold unrelated data; that number is what the add
+    /// dialog shows so "resume" is an informed decision.
+    #[test]
+    fn foreign_entries_exclude_the_payload() {
+        let root = std::env::temp_dir().join(format!("makemake-foreign-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(root.join("pack")).unwrap();
+
+        fs::write(root.join("pack/a.bin"), b"a").unwrap();
+        fs::write(root.join("pack/readme.txt"), b"not part of the torrent").unwrap();
+        fs::write(root.join("stray.bin"), b"?!" as &[u8]).unwrap();
+
+        let payload = vec![(PathBuf::from("pack/a.bin"), 1u64)];
+        assert_eq!(count_foreign_entries(&root, &payload, 100), 2);
+        // The cap is honoured instead of walking everything.
+        assert_eq!(count_foreign_entries(&root, &payload, 1), 1);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// "Start over" may only erase the torrent's own payload, never the rest of the folder.
+    #[test]
+    fn wipe_removes_only_the_torrents_own_files() {
+        let root = std::env::temp_dir().join(format!("makemake-wipe-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(root.join("pack/empty")).unwrap();
+
+        fs::write(root.join("pack/movie.mkv"), vec![7u8; 32]).unwrap();
+        fs::write(root.join("pack/notes.txt"), b"keep me").unwrap();
+        fs::write(root.join("stray.bin"), b"keep me too").unwrap();
+
+        let files = vec![
+            (PathBuf::from("pack/movie.mkv"), 32u64),
+            (PathBuf::from("pack/empty"), 0u64),
+        ];
+
+        assert_eq!(wipe_payload(&root, &files).unwrap(), 1);
+        assert!(!root.join("pack/movie.mkv").exists(), "payload must be gone");
+        assert!(root.join("pack/notes.txt").is_file(), "foreign files must survive");
+        assert!(root.join("stray.bin").is_file());
+        assert!(root.join("pack/empty").is_dir(), "a directory is never deleted");
+        assert!(root.is_dir(), "the payload folder itself always stays");
+
+        // Idempotent: a second pass finds nothing to delete.
+        assert_eq!(wipe_payload(&root, &files).unwrap(), 0);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A hostile payload path must never turn into a delete outside the torrent's folder.
+    #[test]
+    fn wipe_refuses_paths_outside_the_output_folder() {
+        let root = std::env::temp_dir().join(format!("makemake-wipe-escape-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let output = root.join("torrent");
+        fs::create_dir_all(&output).unwrap();
+
+        let victim = root.join("victim.txt");
+        fs::write(&victim, b"do not delete").unwrap();
+
+        let files = vec![
+            (PathBuf::from("../victim.txt"), 12u64),
+            (PathBuf::from("nested/../../victim.txt"), 12u64),
+        ];
+
+        assert_eq!(wipe_payload(&output, &files).unwrap(), 0);
+        assert!(victim.is_file(), "the escape attempt must be ignored");
 
         fs::remove_dir_all(&root).ok();
     }
