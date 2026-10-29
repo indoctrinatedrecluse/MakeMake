@@ -4,7 +4,7 @@
 ```
                      .---.
                     /     \
-                   | () () |       MAKEMAKE PROTOCOL v0.1.0
+                   | () () |       MAKEMAKE PROTOCOL v0.1.2
                     \  ^  /        [SYSTEM: AHU-ONLINE]
                      |||||         [SWARM: TANGATA-MANU ACTIVE]
                     /=====\

@@ -1,7 +1,7 @@
 {
   "name": "makemake",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MakeMake // Rapa Nui Cyberpunk BitTorrent Engine",
   "author": "Abhishek Mitra (indoctrinatedrecluse)",
   "license": "Apache-2.0",

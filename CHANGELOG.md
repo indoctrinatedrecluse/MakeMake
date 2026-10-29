@@ -4,14 +4,24 @@ All notable changes to **MakeMake // Rapa Nui Cyberpunk BitTorrent Engine** are 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.1.2] — 2026-10-29
+
+Licensing release: MakeMake is open source under **Apache-2.0**, and the published installer now
+carries the terms instead of only the repository doing so.
 
 ### Added
 - **Apache-2.0 licensing**: `LICENSE` carries the verbatim Apache License 2.0 text with the
   copyright notice appended, and `NOTICE` provides the attribution. The `Apache-2.0` SPDX
   identifier plus `Copyright 2026 Abhishek Mitra (indoctrinatedrecluse)` are declared in
-  `package.json`, `src-tauri/Cargo.toml` and the Tauri bundle, so the installed executable's
-  version resource and the NSIS installer surface the same terms.
+  `package.json`, `src-tauri/Cargo.toml` and the Tauri bundle.
+- **Installer license page**: the NSIS installer renders the Apache 2.0 agreement
+  (`MUI_PAGE_LICENSE`) and the executable's version resource reports
+  `LegalCopyright: Copyright 2026 Abhishek Mitra (indoctrinatedrecluse)`.
+
+### Changed
+- The repository is **public**, so release artifacts download without authentication.
+- Commit history was normalised to the GitHub noreply identity — no personal email addresses are
+  published.
 
 ## [v0.1.1] — 2026-10-29
 
