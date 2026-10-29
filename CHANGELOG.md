@@ -4,6 +4,48 @@ All notable changes to **MakeMake // Rapa Nui Cyberpunk BitTorrent Engine** are 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.4] — 2026-10-29
+
+Engine-hardening release. Two small, well-tested crates replace hand-rolled code where the
+hand-rolled version was measurably wrong, and the numbers behind the previous release's disk bug
+are now visible in the UI instead of only in the log.
+
+### Added
+- **Free space of the download volume in the footer** (`DISK FREE`, amber under 10 %, red under
+  2 %), read through `fs4` (`statvfs` / `GetDiskFreeSpaceExW`) and cached for 5 s so the
+  one-second UI poll never re-stats the filesystem.
+- **A disk-space warning when a torrent does not fit.** The add dialog reports how much is free
+  versus what the swarm needs, and the engine logs the same at add time. Sparse placeholders make
+  such a torrent cost nothing to *queue*, but it will stall once the volume fills — exactly what
+  the 133 GiB torrent did in v0.1.3.
+- **`ON DISK` in the Overview tab** of the details drawer: the bytes the filesystem actually
+  reserved for the payload, next to its declared size, marked `sparse` while the two differ.
+  `get_torrent_disk_usage` asks the filesystem through `fs4::FileExt::allocated_size`
+  (`GetFileInformationByHandleEx` / `SEEK_HOLE`) and never reads a payload byte.
+
+### Changed
+- **Torrent names stay readable on disk.** Folder and `.torrent` archive names used to go through
+  a hand-rolled sanitizer that replaced *every* non-alphanumeric character, so
+  `Cyberpunk 2077 [DODI Repack]` became `Cyberpunk 2077 _DODI Repack_`. They now go through
+  `sanitize-filename` (Node's rules — illegal characters, Windows device names such as `CON` and
+  `NUL`, trailing dots and spaces), which keeps punctuation and still guarantees one safe path
+  component.
+- **Payload pre-creation runs off the async runtime.** [`sparse::prepare_payload`] performs one
+  `open` + one `FSCTL_SET_SPARSE` per file; on a 20 000-file pack that blocked a runtime worker —
+  and therefore the UI polls and the swarm's own IO — for the whole pass. The add path and the
+  launch-time restore now run it in `spawn_blocking`, and directories are created once per
+  directory instead of once per file.
+- A payload path already occupied by a directory or a reparse point is skipped and counted instead
+  of aborting the whole pass, which would have left librqbit to allocate the remaining files
+  densely.
+
+### Dependencies
+- `sanitize-filename` (name sanitising; reuses the `regex` already compiled in the tree via
+  librqbit) and `fs4` (filesystem statistics and allocated size; `windows-sys` on Windows, no new
+  native dependency).
+- Tests for name sanitising (readability, Windows device names, path separators, length clamp) and
+  for payload pre-creation (occupied paths are skipped, nested directories created once).
+
 ## [v0.1.3] — 2026-10-29
 
 Reliability release. A deep dive into the four symptoms — magnets that never reached the queue,

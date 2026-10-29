@@ -690,6 +690,7 @@ export const App: React.FC = () => {
         isOpen={isAddModalOpen}
         defaultDownloadDir={settings.defaultDownloadDir}
         alwaysAskDownloadDir={settings.alwaysAskDownloadDir}
+        diskFreeBytes={stats.diskFreeBytes}
         initialMagnetOrFile={initialAddPayload}
         onClose={() => setIsAddModalOpen(false)}
         onAddConfirm={handleAddConfirm}

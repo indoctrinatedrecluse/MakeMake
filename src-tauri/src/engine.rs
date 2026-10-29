@@ -13,7 +13,7 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OnceCell, RwLock};
 
 use crate::models::{
-    BackupResult, ClientSettings, PeerDetail, SystemStats, TorrentFileItem, TorrentItem,
-    TorrentMetadataPreview, TorrentSnapshot,
+    BackupResult, ClientSettings, PeerDetail, SystemStats, TorrentDiskUsage, TorrentFileItem,
+    TorrentItem, TorrentMetadataPreview, TorrentSnapshot,
 };
 use crate::sparse;
 
@@ -325,6 +325,30 @@ pub struct TorrentEngine {
     meta_cache: Arc<Mutex<HashMap<String, Arc<CachedMeta>>>>,
     /// Magnets that are queued but not yet resolved/handed to librqbit.
     pending: Arc<Mutex<HashMap<String, PendingAdd>>>,
+    /// Last sampled filesystem numbers for the download volume (see [`DiskSample`]).
+    disk: Arc<Mutex<DiskSample>>,
+}
+
+/// Cached free/total space of the download volume.
+///
+/// One `statvfs`/`GetDiskFreeSpaceExW` call is cheap, but the window polls the engine every
+/// second and the numbers only change when bytes are written, so they are re-sampled at most
+/// once every [`Self::SAMPLE_INTERVAL`].
+#[derive(Debug, Default, Clone, Copy)]
+struct DiskSample {
+    sampled_at: Option<Instant>,
+    free_bytes: u64,
+    total_bytes: u64,
+}
+
+impl DiskSample {
+    const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+
+    fn is_fresh(&self) -> bool {
+        self.sampled_at
+            .map(|at| at.elapsed() < Self::SAMPLE_INTERVAL)
+            .unwrap_or(false)
+    }
 }
 
 /// Progress of one launch-time re-arm attempt.
@@ -400,6 +424,7 @@ impl TorrentEngine {
             pending_rearm: Arc::new(Mutex::new(HashMap::new())),
             meta_cache: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(pending)),
+            disk: Arc::new(Mutex::new(DiskSample::default())),
         }
     }
 
@@ -437,11 +462,33 @@ impl TorrentEngine {
                 })?;
                 fs::create_dir_all(&persistence_dir).ok();
 
+                // Diagnostics: the free space of the volume every download lands on is the
+                // number that explains a stalled swarm, so put it in the log at startup.
+                match (
+                    fs4::available_space(&default_output),
+                    fs4::total_space(&default_output),
+                ) {
+                    (Ok(free), Ok(total)) => log::info!(
+                        "download volume {}: {} free of {} bytes",
+                        default_output.display(),
+                        free,
+                        total
+                    ),
+                    _ => log::warn!(
+                        "cannot read filesystem statistics for {}",
+                        default_output.display()
+                    ),
+                }
+
                 // Torrents restored from librqbit's session database never pass through
                 // `add_resolved`, so their payload has to be pre-created here — otherwise a
                 // restored multi-gigabyte torrent would still be allocated densely the
-                // moment the app launches.
-                precreate_restored_payloads(&persistence_dir);
+                // moment the app launches. Blocking work, so it runs off the runtime.
+                let restore_dir = persistence_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    precreate_restored_payloads(&restore_dir);
+                })
+                .await;
 
                 let build_opts = |port: u16| SessionOptions {
                     dht: Some(DhtSessionConfig::default()),
@@ -616,6 +663,10 @@ impl TorrentEngine {
             let mut guard = self.settings.write().await;
             *guard = settings.clone();
         }
+
+        // The download folder may have moved to another volume: drop the cached filesystem
+        // numbers so the next poll samples the new one.
+        self.invalidate_disk_sample().await;
 
         // Apply the new rate limits to the live session, if it already exists.
         if let Some(session) = self.session.get() {
@@ -1003,7 +1054,93 @@ impl TorrentEngine {
 
         // Queued magnets belong to the queue even though librqbit does not know them yet.
         stats.total_torrents += self.pending.lock().await.len();
+
+        let (free, total) = self.disk_space().await;
+        stats.disk_free_bytes = free;
+        stats.disk_total_bytes = total;
         stats
+    }
+
+    /// The directory new downloads land in (settings first, OS downloads folder otherwise).
+    async fn download_dir(&self) -> PathBuf {
+        let settings = self.settings.read().await;
+        resolve_download_dir(&settings, None).unwrap_or_else(|_| self.state_dir.to_path_buf())
+    }
+
+    /// Forget the cached filesystem numbers (the download folder moved to another volume).
+    async fn invalidate_disk_sample(&self) {
+        self.disk.lock().await.sampled_at = None;
+    }
+
+    /// Free and total bytes of the volume that holds the download directory.
+    ///
+    /// `fs4` wraps `statvfs`/`GetDiskFreeSpaceExW`, so the same call works on every platform
+    /// MakeMake runs on. The result is cached for [`DiskSample::SAMPLE_INTERVAL`] because the
+    /// UI polls once a second and the numbers only move when bytes are written.
+    async fn disk_space(&self) -> (u64, u64) {
+        {
+            let sample = self.disk.lock().await;
+            if sample.is_fresh() {
+                return (sample.free_bytes, sample.total_bytes);
+            }
+        }
+
+        let dir = self.download_dir().await;
+        let (free, total) = tokio::task::spawn_blocking(move || {
+            (
+                fs4::available_space(&dir).unwrap_or(0),
+                fs4::total_space(&dir).unwrap_or(0),
+            )
+        })
+        .await
+        .unwrap_or((0, 0));
+
+        let mut sample = self.disk.lock().await;
+        if total > 0 {
+            sample.sampled_at = Some(Instant::now());
+            sample.free_bytes = free;
+            sample.total_bytes = total;
+        } else {
+            // The volume could not be read (the download folder may not exist yet): keep the
+            // cache empty so the next poll retries instead of serving zeros for five seconds.
+            sample.sampled_at = None;
+        }
+        (free, total)
+    }
+
+    /// What one torrent actually occupies on disk, compared with its logical size.
+    ///
+    /// A sparse payload has a logical length of hundreds of gigabytes and an *allocated*
+    /// size of a few megabytes, so this is the number that explains why a 133 GiB torrent
+    /// costs nothing until it downloads. `fs4::FileExt::allocated_size` asks the filesystem
+    /// (`GetFileInformationByHandleEx`/`SEEK_DATA`), it never reads file contents.
+    pub async fn torrent_disk_usage(&self, info_hash: &str) -> Result<TorrentDiskUsage, String> {
+        if self.pending.lock().await.contains_key(info_hash) {
+            // Nothing exists on disk yet for a magnet that has not resolved.
+            return Ok(TorrentDiskUsage::default());
+        }
+
+        let session = self.session().await?;
+        let (_, handle) = Self::find_handle(&session, info_hash)
+            .ok_or_else(|| format!("torrent {info_hash} is not managed by this session"))?;
+
+        let output_folder = handle.output_folder().to_path_buf();
+        let payload: Vec<PathBuf> = handle
+            .with_metadata(|metadata| {
+                metadata
+                    .info
+                    .iter_file_details()
+                    .filter(|details| !details.attrs().padding)
+                    .map(|details| details.filename.to_pathbuf())
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|_| "torrent metadata is not available yet".to_string())?;
+
+        // One `open` + one query per file: blocking work, and a big pack has thousands of
+        // files, so it never runs on the async runtime.
+        tokio::task::spawn_blocking(move || crate::sparse::measure_usage(&output_folder, &payload))
+            .await
+            .map_err(|e| format!("cannot measure disk usage: {e}"))
     }
 
     /// Torrent list + global counters in a single round trip.
@@ -1042,6 +1179,12 @@ impl TorrentEngine {
                 (dht.routing_table_size + dht.routing_table_size_v6).min(u32::MAX as usize) as u32
             })
             .unwrap_or(0);
+
+        // The footer's disk gauge. `get_system_stats` fills the same two fields; this is the
+        // command the window actually polls, so it has to carry them too.
+        let (free, total) = self.disk_space().await;
+        stats.disk_free_bytes = free;
+        stats.disk_total_bytes = total;
 
         Ok(TorrentSnapshot { torrents, stats })
     }
@@ -1304,19 +1447,46 @@ impl TorrentEngine {
         // 133 GiB torrent, files outside `only_files` were extended too), and any file that
         // is not already sparse gets allocated densely.
         let payload = payload_files(&info, None);
+        let total_bytes = info.lengths().total_length();
 
-        match sparse::prepare_payload(&output_dir, &payload) {
-            Ok(summary) => log::info!(
-                "payload {}: {} file(s) pre-created sparse, {} already present",
+        // Pre-creation is pure blocking filesystem work (one open + one ioctl per file), so
+        // it must not run on a runtime worker thread: a 20 000-file pack would stall every
+        // other task — including the UI polls — for the duration.
+        let prepare_dir = output_dir.clone();
+        match tokio::task::spawn_blocking(move || sparse::prepare_payload(&prepare_dir, &payload))
+            .await
+        {
+            Ok(Ok(summary)) => log::info!(
+                "payload {}: {} file(s) pre-created sparse, {} already present, {} skipped",
                 short_hash(&info_hash),
                 summary.files,
-                summary.existing
+                summary.existing,
+                summary.skipped
             ),
-            Err(err) => log::warn!(
+            Ok(Err(err)) => log::warn!(
                 "cannot pre-create payload for {}: {err} (the download will still start, but \
                  librqbit will reserve the full size on disk)",
                 short_hash(&info_hash)
             ),
+            Err(err) => log::warn!(
+                "payload pre-creation task for {} failed: {err}",
+                short_hash(&info_hash)
+            ),
+        }
+
+        // Sparse placeholders cost nothing, so a torrent larger than the volume is fine right
+        // up to the moment the disk actually fills. Say so now instead of mystery stalling
+        // hours later.
+        let (free_bytes, _) = self.disk_space().await;
+        if free_bytes > 0 && total_bytes > free_bytes {
+            log::warn!(
+                "torrent {} needs {} but only {} is free in {}; the download will stall when \
+                 the volume fills",
+                short_hash(&info_hash),
+                total_bytes,
+                free_bytes,
+                output_dir.display()
+            );
         }
 
         let mut opts = AddTorrentOptions {
@@ -2000,6 +2170,12 @@ fn precreate_restored_payloads(persistence_dir: &Path) {
                 short_hash(&record.info_hash),
                 record.output_folder
             ),
+            Ok(summary) if summary.skipped > 0 => log::warn!(
+                "restored torrent {}: {} payload path(s) are occupied by something that is not \
+                 a file and were left alone",
+                short_hash(&record.info_hash),
+                summary.skipped
+            ),
             Ok(_) => {}
             Err(err) => log::warn!(
                 "cannot pre-create payload for restored torrent {}: {err}",
@@ -2137,23 +2313,42 @@ fn load_persisted_state(state_dir: &Path) -> PersistedState {
     }
 }
 
+/// Turn a torrent name into a single, safe path component.
+///
+/// This delegates to `sanitize-filename`, which implements the same rules as Node's module
+/// of that name: characters NTFS rejects (`\ / : * ? " < > |`) become `_`, control
+/// characters are dropped, Windows device names (`CON`, `NUL`, `COM1`, …) are neutralised,
+/// trailing dots/spaces are removed and the result is capped at 255 bytes. Ordinary
+/// punctuation is *kept*, so `Cyberpunk 2077 [DODI Repack]` stays readable instead of
+/// turning into `Cyberpunk 2077 _DODI Repack_`.
 fn sanitize_file_name(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let trimmed = cleaned.trim().trim_matches('.').to_string();
-    if trimmed.is_empty() {
-        "makemake-torrent".to_string()
-    } else {
-        trimmed.chars().take(96).collect()
+    // Windows refuses to create a component that ends in a dot or a space. The crate would
+    // replace that run with the replacement string instead of dropping it, so drop it first.
+    let name = name.trim().trim_end_matches(['.', ' ']);
+    if name.is_empty() {
+        return "makemake-torrent".to_string();
     }
+
+    let cleaned = sanitize_filename::sanitize_with_options(
+        name,
+        sanitize_filename::Options {
+            // MakeMake only ships Windows builds, and a state/vault folder that is copied to
+            // a network share should stay portable, so Windows rules are always applied.
+            windows: true,
+            truncate: true,
+            replacement: "_",
+        },
+    );
+
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() || cleaned.chars().all(|c| c == '_') {
+        return "makemake-torrent".to_string();
+    }
+
+    // Keep room for the archive suffix (`-<hash>.torrent`) and for the download folder to
+    // nest a few levels deep below the user's chosen root.
+    let trimmed: String = cleaned.chars().take(96).collect();
+    trimmed.trim_end().to_string()
 }
 
 fn default_settings(state_dir: &Path) -> ClientSettings {
@@ -2455,6 +2650,52 @@ fn coarse_piece_map(downloaded_bytes: u64, total_bytes: u64) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// Torrent names become folders on disk, so they must survive sanitising *and* stay
+    /// recognisable: only characters Windows rejects are replaced.
+    #[test]
+    fn torrent_names_stay_readable_but_path_safe() {
+        assert_eq!(
+            sanitize_file_name("Cyberpunk 2077 [DODI Repack]"),
+            "Cyberpunk 2077 [DODI Repack]"
+        );
+        assert_eq!(
+            sanitize_file_name("AC/DC: Live & Loud?"),
+            "AC_DC_ Live & Loud_"
+        );
+        // Windows refuses trailing dots and spaces.
+        assert_eq!(sanitize_file_name("ubuntu-24.04. "), "ubuntu-24.04");
+        // Reserved device names would create an unusable path (or a device handle).
+        assert!(!sanitize_file_name("CON").eq_ignore_ascii_case("con"));
+        assert!(!sanitize_file_name("nul.txt").eq_ignore_ascii_case("nul.txt"));
+        // Nothing usable left, or absurdly long: still a valid component.
+        assert_eq!(sanitize_file_name("..."), "makemake-torrent");
+        assert_eq!(sanitize_file_name("   "), "makemake-torrent");
+        assert_eq!(sanitize_file_name(&"a".repeat(500)).chars().count(), 96);
+    }
+
+    /// `/` and `\` must never survive, or a torrent name could escape the download folder.
+    #[test]
+    fn sanitizing_never_produces_a_path_separator() {
+        use std::path::Component;
+
+        let hostile = sanitize_file_name("../../etc/passwd\\..\\boot.ini");
+        assert!(!hostile.contains('/'), "got {hostile}");
+        assert!(!hostile.contains('\\'), "got {hostile}");
+
+        // The result has to be exactly one ordinary component: never `.`, never `..`, never a
+        // prefix, so joining it onto the download folder cannot leave that folder.
+        let mut components = Path::new(&hostile).components();
+        assert!(matches!(components.next(), Some(Component::Normal(_))), "got {hostile}");
+        assert!(components.next().is_none(), "got {hostile}");
+
+        let base = Path::new("C:/Downloads/MakeMake");
+        assert_eq!(
+            base.join(&hostile).parent(),
+            Some(base),
+            "escaped the download folder"
+        );
+    }
+
     /// Minimal single-file BitTorrent v1 metadata:
     /// `{ info: { length: 5, name: "test.txt", piece length: 16384, pieces: <20 bytes> } }`
     fn sample_torrent_bencode() -> Vec<u8> {
@@ -2601,6 +2842,95 @@ mod tests {
             .await
             .expect("torrent should be removed");
         assert!(TorrentEngine::find_handle(&session, &item.info_hash).is_none());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Single-file torrent whose payload is exactly `length` bytes.
+    fn single_file_torrent_bencode(name: &str, length: u64, piece_length: u32) -> Vec<u8> {
+        let pieces = (length.div_ceil(piece_length as u64) as usize) * 20;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"d4:infod6:lengthi");
+        bytes.extend_from_slice(length.to_string().as_bytes());
+        bytes.extend_from_slice(format!("e4:name{}:{name}12:piece lengthi", name.len()).as_bytes());
+        bytes.extend_from_slice(piece_length.to_string().as_bytes());
+        bytes.extend_from_slice(b"e6:pieces");
+        bytes.extend_from_slice(pieces.to_string().as_bytes());
+        bytes.extend_from_slice(b":");
+        bytes.extend_from_slice(&vec![0u8; pieces]);
+        bytes.extend_from_slice(b"ee");
+        bytes
+    }
+
+    /// The `ON DISK` figure the drawer shows: the engine must see the full logical payload
+    /// length while the filesystem has reserved almost nothing for the sparse placeholder.
+    #[tokio::test]
+    async fn disk_usage_reports_a_sparse_payload() {
+        const LENGTH: u64 = 8 * 1024 * 1024;
+
+        let root = std::env::temp_dir().join(format!("makemake-usage-engine-{}", std::process::id()));
+        let output = root.join("out");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&output).unwrap();
+
+        // Same pre-creation the add path performs before handing the torrent to librqbit.
+        sparse::prepare_payload(&output, &[(PathBuf::from("big.bin"), LENGTH)]).unwrap();
+
+        let bytes = single_file_torrent_bencode("big.bin", LENGTH, 16_384);
+        let info_hash = torrent_from_bytes(&bytes)
+            .expect("sample must parse")
+            .info_hash
+            .as_string();
+
+        let session = Session::new_with_opts(
+            output.clone(),
+            SessionOptions {
+                dht: None,
+                persistence: None,
+                listen: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("offline session should start");
+
+        session
+            .add_torrent(
+                AddTorrent::from_bytes(bytes),
+                Some(AddTorrentOptions {
+                    paused: true,
+                    overwrite: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("torrent should be added");
+
+        // `torrent_disk_usage` resolves the session through the engine's own lazily-created
+        // cell; seeding it keeps the test offline.
+        let engine = TorrentEngine::with_state_dir(root.join("state"));
+        engine.session.set(session).ok();
+
+        // librqbit extends the payload during initialisation, so wait for that to land.
+        let mut usage = TorrentDiskUsage::default();
+        for _ in 0..100 {
+            usage = engine
+                .torrent_disk_usage(&info_hash)
+                .await
+                .expect("usage must be measurable");
+            if usage.logical_bytes == LENGTH {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        assert_eq!(usage.files, 1, "the payload file exists on disk");
+        assert_eq!(usage.logical_bytes, LENGTH, "the declared size must be reported");
+        assert!(
+            usage.allocated_bytes < 1024 * 1024,
+            "a sparse payload must not be allocated densely, got {} bytes",
+            usage.allocated_bytes
+        );
 
         fs::remove_dir_all(&root).ok();
     }

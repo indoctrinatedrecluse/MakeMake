@@ -3,8 +3,8 @@ use std::process::Command;
 
 use crate::engine::TorrentEngine;
 use crate::models::{
-    BackupResult, ClientSettings, PeerDetail, SystemStats, TorrentItem, TorrentMetadataPreview,
-    TorrentSnapshot,
+    BackupResult, ClientSettings, PeerDetail, SystemStats, TorrentDiskUsage, TorrentItem,
+    TorrentMetadataPreview, TorrentSnapshot,
 };
 
 #[tauri::command]
@@ -123,6 +123,15 @@ pub fn open_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn get_system_stats(engine: State<'_, TorrentEngine>) -> Result<SystemStats, String> {
     Ok(engine.get_system_stats().await)
+}
+
+/// Logical vs. actually allocated bytes of one torrent's payload (sparse-aware).
+#[tauri::command]
+pub async fn get_torrent_disk_usage(
+    id: String,
+    engine: State<'_, TorrentEngine>,
+) -> Result<TorrentDiskUsage, String> {
+    engine.torrent_disk_usage(&id).await
 }
 
 #[tauri::command]

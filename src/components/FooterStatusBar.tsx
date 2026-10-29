@@ -75,6 +75,23 @@ export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
     ? [settings.turtleDownloadSpeed, settings.turtleUploadSpeed]
     : [settings.maxDownloadSpeed, settings.maxUploadSpeed];
 
+  // Free space on the volume that holds the download folder (0 = engine has not sampled).
+  const diskFree = stats.diskFreeBytes ?? 0;
+  const diskTotal = stats.diskTotalBytes ?? 0;
+  const diskFreeRatio = diskTotal > 0 ? diskFree / diskTotal : 1;
+  const diskTone =
+    diskFreeRatio <= 0.02
+      ? 'text-cyber-red'
+      : diskFreeRatio <= 0.1
+      ? 'text-cyber-amber'
+      : 'text-cyber-green';
+  const diskTitle =
+    diskTotal > 0
+      ? `Free space on the download volume: ${formatBytes(diskFree)} of ${formatBytes(
+          diskTotal,
+        )}. Payload files are sparse, so adding a torrent costs nothing until it downloads.`
+      : 'Disk usage is not available yet';
+
   return (
     <footer className="h-8 px-4 border-t border-slate-800 bg-obsidian-950 flex items-center justify-between text-[11px] font-mono text-slate-400 select-none z-30">
       {/* Left Telemetry Cluster */}
@@ -125,6 +142,24 @@ export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
           <HardDrive className="w-3.5 h-3.5" />
           <span>SESSION INGESTED: <strong className="text-slate-200">{formatBytes(stats.totalDownloadedAllTime)}</strong></span>
         </div>
+
+        {/* Free space on the download volume — the number that used to be a mystery
+            when a 133 GiB torrent silently filled the disk. */}
+        {diskTotal > 0 && (
+          <>
+            <div className="h-3.5 w-[1px] bg-slate-800 hidden sm:block" />
+            <div
+              className={`hidden sm:flex items-center space-x-1.5 ${diskTone}`}
+              title={diskTitle}
+            >
+              <HardDrive className="w-3.5 h-3.5" />
+              <span>
+                DISK FREE: <strong>{formatBytes(diskFree)}</strong>
+                <span className="hidden xl:inline text-slate-500"> / {formatBytes(diskTotal)}</span>
+              </span>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Right Controls Cluster */}

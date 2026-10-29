@@ -73,6 +73,23 @@ pub struct TorrentSnapshot {
     pub stats: SystemStats,
 }
 
+/// How much of a torrent's payload actually exists on disk.
+///
+/// `logical_bytes` is what the torrent declares (the sum of `File::len()`), while
+/// `allocated_bytes` is what the filesystem reserved for those files. MakeMake pre-creates
+/// payload files as *sparse*, so a freshly added torrent reports the full logical length and
+/// almost no allocation, and the gap closes as pieces are written.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentDiskUsage {
+    /// Files of this torrent that exist on disk.
+    pub files: usize,
+    /// Sum of the logical file lengths (i.e. downloaded bytes once complete).
+    pub logical_bytes: u64,
+    /// Bytes the filesystem actually reserved for those files.
+    pub allocated_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientSettings {
@@ -170,4 +187,10 @@ pub struct SystemStats {
     pub resumed_torrents: u32,
     /// Unix ms of the last durable state checkpoint written to disk.
     pub checkpoint_at: i64,
+    /// Bytes available to the user on the volume that holds the download directory.
+    #[serde(default)]
+    pub disk_free_bytes: u64,
+    /// Total size of that volume.
+    #[serde(default)]
+    pub disk_total_bytes: u64,
 }

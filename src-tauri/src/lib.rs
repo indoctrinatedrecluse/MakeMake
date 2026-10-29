@@ -39,6 +39,7 @@ pub fn run() {
             commands::parse_torrent_file,
             commands::open_folder,
             commands::get_system_stats,
+            commands::get_torrent_disk_usage,
             commands::pause_all,
             commands::resume_all,
             commands::set_priority,

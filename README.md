@@ -4,7 +4,7 @@
 ```
                      .---.
                     /     \
-                   | () () |       MAKEMAKE PROTOCOL v0.1.3
+                   | () () |       MAKEMAKE PROTOCOL v0.1.4
                     \  ^  /        [SYSTEM: AHU-ONLINE]
                      |||||         [SWARM: TANGATA-MANU ACTIVE]
                     /=====\
@@ -124,7 +124,11 @@ Use this exact prompt in **Google Veo / Imagen 3 Video / VideoFX** to generate t
 * **Styling**: Tailwind CSS + Custom CSS Cyber Shaders
 * **3D & Visualizations**: Three.js / React Three Fiber, Canvas2D procedural particle engines
 * **Icons**: Custom SVG Rapa Nui & Cyberpunk Iconography + Lucide Icons
-* **Torrent Core**: High-speed Rust BitTorrent coordinator supporting Bencode parsing, DHT metadata resolution, SHA-1 piece verification, and automated disk persistence.
+* **Torrent Core**: High-speed Rust BitTorrent coordinator (librqbit) with DHT metadata
+  resolution, SHA-1 piece verification, automated disk persistence, and **sparse payload
+  pre-allocation** so adding a 133 GiB torrent costs kilobytes instead of the whole torrent.
+  Filesystem numbers (free space, real allocated size) come from `fs4`; torrent names are made
+  path-safe with `sanitize-filename`.
 
 ---
 

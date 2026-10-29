@@ -100,6 +100,22 @@ export interface TorrentSnapshot {
   stats: SystemStats;
 }
 
+/**
+ * Logical size vs. bytes actually allocated on disk for one torrent.
+ *
+ * MakeMake pre-creates payload files as sparse files, so a freshly added 133 GiB torrent
+ * reports the full logical length and only a few megabytes of allocation; the gap closes as
+ * pieces are written.
+ */
+export interface TorrentDiskUsage {
+  /** Payload files of this torrent that exist on disk. */
+  files: number;
+  /** Sum of the logical file lengths (the declared torrent size). */
+  logicalBytes: number;
+  /** Bytes the filesystem actually reserved for those files. */
+  allocatedBytes: number;
+}
+
 export interface SystemStats {
   globalDownloadSpeed: number;
   globalUploadSpeed: number;
@@ -116,4 +132,8 @@ export interface SystemStats {
   resumedTorrents: number;
   /** Unix ms of the last durable state checkpoint. */
   checkpointAt: number;
+  /** Free bytes on the volume that holds the download folder (0 = unknown). */
+  diskFreeBytes?: number;
+  /** Total size of that volume (0 = unknown). */
+  diskTotalBytes?: number;
 }

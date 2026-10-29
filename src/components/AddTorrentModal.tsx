@@ -21,6 +21,8 @@ interface AddTorrentModalProps {
   isOpen: boolean;
   defaultDownloadDir: string;
   alwaysAskDownloadDir?: boolean;
+  /** Free bytes on the download volume (0/undefined = unknown). */
+  diskFreeBytes?: number;
   initialMagnetOrFile?: { type: 'magnet' | 'file'; data: string; name?: string } | null;
   onClose: () => void;
   onAddConfirm: (preview: TorrentMetadataPreview, targetDir: string) => void;
@@ -38,6 +40,7 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
   isOpen,
   defaultDownloadDir,
   alwaysAskDownloadDir = true,
+  diskFreeBytes,
   initialMagnetOrFile,
   onClose,
   onAddConfirm,
@@ -381,6 +384,19 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
                 <div className="text-[10px] font-mono text-cyber-gold border-t border-slate-800/80 pt-2">
                   Metadata not available yet — MakeMake will fetch the file list from the swarm and
                   begin the download automatically.
+                </div>
+              )}
+
+              {/* The disk cannot hold this swarm. Payload files are sparse, so adding it is
+                  free — but it will stall once the volume actually fills. */}
+              {!!diskFreeBytes && preview.totalSize > diskFreeBytes && (
+                <div className="flex items-start space-x-1.5 text-[10px] font-mono text-cyber-amber border-t border-slate-800/80 pt-2">
+                  <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-[1px]" />
+                  <span>
+                    Only {formatBytes(diskFreeBytes)} free on the download volume, but this swarm
+                    needs {formatBytes(preview.totalSize)}. Files are allocated sparse as pieces
+                    arrive, so it can be queued — it will stall once the disk fills.
+                  </span>
                 </div>
               )}
             </div>

@@ -22,9 +22,14 @@
 //!
 //! Existing files are never truncated: only paths that are missing (or empty) are created.
 
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+
+use fs4::FileExt as _;
+
+use crate::models::TorrentDiskUsage;
 
 /// Summary of what pre-creation touched, for logging.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -33,14 +38,24 @@ pub struct Preallocated {
     pub files: usize,
     /// Files that already existed and were left untouched.
     pub existing: usize,
+    /// Payload paths occupied by something that is not a regular file (a directory, a
+    /// reparse point…). Left alone so one odd path cannot abort the whole torrent.
+    pub skipped: usize,
 }
 
 /// Create `files` (path relative to `output_dir`, plus length) as empty sparse files.
 ///
 /// Paths that already exist are left exactly as they are, so resuming, re-checking and
 /// seeding over real data never loses a byte.
+///
+/// This performs blocking filesystem calls — one `open`/`ioctl` per payload file, which is
+/// tens of thousands of syscalls for a large pack — so callers on the async runtime should
+/// run it inside [`tokio::task::spawn_blocking`].
 pub fn prepare_payload(output_dir: &Path, files: &[(PathBuf, u64)]) -> io::Result<Preallocated> {
     let mut summary = Preallocated::default();
+    // Files of one torrent usually share a handful of directories; creating each one once
+    // keeps a 20 000-file pack from issuing 20 000 redundant `create_dir_all` calls.
+    let mut prepared_dirs: HashSet<PathBuf> = HashSet::new();
 
     for (relative, _length) in files {
         let target = output_dir.join(relative);
@@ -55,10 +70,16 @@ pub fn prepare_payload(output_dir: &Path, files: &[(PathBuf, u64)]) -> io::Resul
                 }
                 continue;
             }
+            // Something that is not a regular file already occupies this path. Skip it
+            // rather than failing the add: librqbit reports the affected file itself.
+            summary.skipped += 1;
+            continue;
         }
 
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
+            if prepared_dirs.insert(parent.to_path_buf()) {
+                fs::create_dir_all(parent)?;
+            }
         }
 
         let file = OpenOptions::new()
@@ -117,6 +138,39 @@ fn mark_sparse(_file: &fs::File) -> io::Result<()> {
     Ok(())
 }
 
+/// Sum the logical and the *allocated* size of payload files that already exist on disk.
+///
+/// Sparse files have a logical length equal to the finished download and an allocated size
+/// equal to what has actually been written, which is exactly the distinction a user wants
+/// after a torrent is added: "21 GB total, 0 bytes on disk yet".
+///
+/// Only metadata is queried (`GetFileInformationByHandleEx` / `SEEK_HOLE`); no payload bytes
+/// are read. Blocking — run it on a blocking thread when thousands of files are involved.
+pub fn measure_usage(output_dir: &Path, files: &[PathBuf]) -> TorrentDiskUsage {
+    let mut usage = TorrentDiskUsage::default();
+
+    for relative in files {
+        let target = output_dir.join(relative);
+        // A file that does not exist yet contributes nothing.
+        let Ok(meta) = fs::metadata(&target) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        usage.files += 1;
+        usage.logical_bytes += meta.len();
+        usage.allocated_bytes += allocated_size(&target).unwrap_or(meta.len());
+    }
+
+    usage
+}
+
+fn allocated_size(path: &Path) -> io::Result<u64> {
+    let file = fs::File::open(path)?;
+    file.allocated_size()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +205,91 @@ mod tests {
         let again = prepare_payload(&root, &files).unwrap();
         assert_eq!(again.files, 0);
         assert_eq!(again.existing, 3);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_directory_on_a_payload_path_is_skipped_not_fatal() {
+        let root = std::env::temp_dir().join(format!("makemake-sparse-skip-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).unwrap();
+
+        // A directory squatting on a payload path must not abort the whole payload: the
+        // remaining files still have to be pre-created, otherwise they get allocated densely.
+        fs::create_dir_all(root.join("taken")).unwrap();
+
+        let files = vec![
+            (PathBuf::from("taken"), 5u64),
+            (PathBuf::from("free.bin"), 9u64),
+        ];
+
+        let summary = prepare_payload(&root, &files).unwrap();
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.files, 1);
+        assert_eq!(summary.existing, 0);
+        assert!(root.join("free.bin").is_file());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn measure_usage_separates_logical_from_allocated_bytes() {
+        let root = std::env::temp_dir().join(format!("makemake-usage-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).unwrap();
+
+        // 4 KiB of real data…
+        fs::write(root.join("real.bin"), vec![7u8; 4096]).unwrap();
+        // …and a 64 MiB payload placeholder that holds nothing.
+        let placeholder = root.join("sparse.bin");
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&placeholder)
+            .unwrap();
+        mark_sparse(&file).unwrap();
+        file.set_len(64 * 1024 * 1024).unwrap();
+        drop(file);
+
+        let usage = measure_usage(
+            &root,
+            &[
+                PathBuf::from("real.bin"),
+                PathBuf::from("sparse.bin"),
+                // Never created: contributes nothing.
+                PathBuf::from("missing.bin"),
+            ],
+        );
+
+        assert_eq!(usage.files, 2);
+        assert_eq!(usage.logical_bytes, 4096 + 64 * 1024 * 1024);
+        assert!(usage.allocated_bytes >= 4096, "real data must be counted");
+        assert!(
+            usage.allocated_bytes < 8 * 1024 * 1024,
+            "the sparse placeholder must stay unallocated, got {}",
+            usage.allocated_bytes
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn nested_directories_are_created_once_per_directory() {
+        let root = std::env::temp_dir().join(format!("makemake-sparse-nested-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).unwrap();
+
+        let files = vec![
+            (PathBuf::from("pack/disc1/a.bin"), 1u64),
+            (PathBuf::from("pack/disc1/b.bin"), 1u64),
+            (PathBuf::from("pack/disc2/c.bin"), 1u64),
+        ];
+
+        let summary = prepare_payload(&root, &files).unwrap();
+        assert_eq!(summary.files, 3);
+        assert!(root.join("pack/disc1/a.bin").is_file());
+        assert!(root.join("pack/disc2/c.bin").is_file());
 
         fs::remove_dir_all(&root).ok();
     }

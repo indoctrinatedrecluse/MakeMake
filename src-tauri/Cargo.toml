@@ -1,6 +1,6 @@
 [package]
 name = "makemake"
-version = "0.1.3"
+version = "0.1.4"
 description = "MakeMake // Rapa Nui Cyberpunk BitTorrent Engine"
 authors = ["Abhishek Mitra (indoctrinatedrecluse)"]
 license = "Apache-2.0"
@@ -33,6 +33,15 @@ log = "0.4"
 # Real BitTorrent engine (DHT, trackers, peer wire protocol, piece verification).
 librqbit = "9.0.1"
 base64 = "0.22"
+
+# Torrent names become directory/file names on disk: this applies Node's
+# `sanitize-filename` rules (illegal characters, Windows device names, trailing dots).
+sanitize-filename = "0.6"
+
+# Filesystem numbers: free/total space of the download volume (`statvfs` /
+# `GetDiskFreeSpaceExW`) and the *allocated* size of a file, which is how a sparse
+# torrent shows that it occupies a fraction of its logical length.
+fs4 = "1.1"
 
 # Windows sparse-file support for payload pre-creation (see `src/sparse.rs`).
 [target.'cfg(windows)'.dependencies]

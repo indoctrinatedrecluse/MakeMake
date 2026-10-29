@@ -19,7 +19,7 @@ import {
   Save,
   ExternalLink,
 } from 'lucide-react';
-import { TorrentItem, TorrentFileItem, PeerDetail } from '../types/torrent';
+import { TorrentItem, TorrentFileItem, PeerDetail, TorrentDiskUsage } from '../types/torrent';
 import { CyberProgressBar } from './gizmos/CyberProgressBar';
 import { SpeedOscilloscope } from './gizmos/SpeedOscilloscope';
 import { AhuBlockMatrix } from './gizmos/AhuBlockMatrix';
@@ -93,10 +93,44 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [torrent.id, selectionSignature]);
 
+  // Logical vs. actually allocated payload bytes. Payload files are sparse, so this is the
+  // honest "what this torrent really costs on disk" figure; refreshing every few seconds is
+  // enough because it only moves as pieces are written.
+  const [diskUsage, setDiskUsage] = useState<TorrentDiskUsage | null>(null);
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'overview' || torrent.resolving) {
+      setDiskUsage(null);
+      return;
+    }
+
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const usage = await TauriBridge.getTorrentDiskUsage(torrent.id);
+        if (!cancelled) setDiskUsage(usage);
+      } catch {
+        if (!cancelled) setDiskUsage(null);
+      }
+    };
+
+    void load();
+    const timer = window.setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isOpen, activeTab, torrent.id, torrent.resolving]);
+
+  // Sparse files normally occupy far less than their logical length; flag the difference
+  // instead of silently reporting the wrong number.
+  const isSparse = useMemo(() => {
+    if (!diskUsage || diskUsage.logicalBytes === 0) return false;
+    return diskUsage.allocatedBytes < diskUsage.logicalBytes * 0.98;
+  }, [diskUsage]);
+
   // Real peer rows from librqbit's live peer registry (only while the tab is visible).
   useEffect(() => {
     if (!isOpen || activeTab !== 'peers') return;
-
     let cancelled = false;
     const load = async () => {
       try {
@@ -259,6 +293,20 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                   <div>
                     <span className="text-slate-500">PIECE SIZE:</span>{' '}
                     <strong className="text-slate-200">{formatBytes(torrent.totalBytes / (torrent.pieceCount || 1))}</strong>
+                  </div>
+                  <div className="col-span-2">
+                    <span className="text-slate-500">ON DISK:</span>{' '}
+                    <strong className={isSparse ? 'text-cyber-gold' : 'text-slate-200'}>
+                      {diskUsage ? formatBytes(diskUsage.allocatedBytes) : '—'}
+                    </strong>
+                    {isSparse && diskUsage && (
+                      <span
+                        className="text-[10px] text-slate-500 ml-1"
+                        title="Payload files are sparse: the filesystem only reserved clusters for the data that has actually been written, so this stays far below the declared torrent size until the download completes."
+                      >
+                        sparse · of {formatBytes(diskUsage.logicalBytes)} logical
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>

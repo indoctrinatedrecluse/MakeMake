@@ -48,7 +48,7 @@ export const Header: React.FC<HeaderProps> = ({
                 MAKEMAKE
               </span>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyber-red/20 text-cyber-red border border-cyber-red/40 font-bold">
-                v0.1.3
+                v0.1.4
               </span>
             </div>
             <div className="text-[9px] font-mono text-slate-400 tracking-wider">

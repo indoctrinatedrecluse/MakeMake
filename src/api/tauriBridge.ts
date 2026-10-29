@@ -5,6 +5,7 @@ import {
   SystemStats,
   PeerDetail,
   TorrentSnapshot,
+  TorrentDiskUsage,
 } from '../types/torrent';
 
 // Detect whether we are running within the Tauri desktop container
@@ -250,6 +251,9 @@ class DevStore {
       restoredTorrents: 0,
       resumedTorrents: 0,
       checkpointAt: Date.now(),
+      // No filesystem in the browser dev store; the footer hides the disk chip when unknown.
+      diskFreeBytes: 0,
+      diskTotalBytes: 0,
     };
   }
 }
@@ -291,6 +295,26 @@ export const TauriBridge = {
       return;
     }
     devStore.startTorrent(id);
+  },
+
+  /**
+   * Logical size vs. bytes actually reserved on disk for one torrent.
+   *
+   * Payload files are kept sparse, so this is the number that shows a 133 GiB torrent
+   * costing a few megabytes until it actually downloads.
+   */
+  async getTorrentDiskUsage(id: string): Promise<TorrentDiskUsage> {
+    if (isTauriEnv()) {
+      return invokeTauri<TorrentDiskUsage>('get_torrent_disk_usage', { id });
+    }
+    // Browser dev has no filesystem to inspect: report the logical size only.
+    const torrent = devStore.getTorrents().find((t) => t.id === id);
+    if (!torrent) return { files: 0, logicalBytes: 0, allocatedBytes: 0 };
+    return {
+      files: torrent.files.length,
+      logicalBytes: torrent.totalBytes,
+      allocatedBytes: torrent.downloadedBytes,
+    };
   },
 
   async getSettings(): Promise<ClientSettings> {
