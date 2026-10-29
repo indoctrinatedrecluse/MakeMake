@@ -10,6 +10,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +57,13 @@ struct TorrentExtras {
     moved_to_completed: bool,
     #[serde(default)]
     trackers: Vec<String>,
+    /// Unix ms of the last successful `.torrent` archive write.
+    #[serde(default)]
+    last_backup_at: i64,
+    /// Whether the user had this swarm running when the app last shut down.
+    /// Used to re-arm it on the next launch.
+    #[serde(default)]
+    resume_on_start: bool,
 }
 
 impl Default for TorrentExtras {
@@ -69,6 +77,8 @@ impl Default for TorrentExtras {
             priority: default_priority(),
             moved_to_completed: false,
             trackers: Vec::new(),
+            last_backup_at: 0,
+            resume_on_start: false,
         }
     }
 }
@@ -124,6 +134,36 @@ pub struct TorrentEngine {
     settings: RwLock<ClientSettings>,
     extras: Mutex<HashMap<String, TorrentExtras>>,
     state_dir: PathBuf,
+    /// Set once the shutdown sequence has begun (pausing only, no new work).
+    shutting_down: AtomicBool,
+    /// Unix ms of the last durable checkpoint (state file + librqbit session db).
+    checkpoint_at: AtomicI64,
+    /// Torrents librqbit restored from its session database on this launch.
+    restored: AtomicU32,
+    /// Of those, how many MakeMake re-armed automatically.
+    resumed: AtomicU32,
+    /// Swarms currently being archived/relocated by a poll. The UI asks for the torrent
+    /// list and the system stats in parallel, which would otherwise race on the same
+    /// vault file.
+    maintenance: Mutex<HashSet<String>>,
+    /// Swarms the launch-time restore still has to wake up. librqbit re-verifies
+    /// restored data and silently drops an unpause that arrives mid-check, so this map
+    /// keeps asking until the swarm has been stable-live for a few polls (or the user
+    /// pauses it explicitly).
+    pending_rearm: Mutex<HashMap<String, RearmStatus>>,
+}
+
+/// Progress of one launch-time re-arm attempt.
+#[derive(Debug, Default, Clone, Copy)]
+struct RearmStatus {
+    attempts: u32,
+    live_streak: u32,
+}
+
+impl Default for TorrentEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TorrentEngine {
@@ -142,7 +182,23 @@ impl TorrentEngine {
             settings: RwLock::new(settings),
             extras: Mutex::new(persisted.torrents),
             state_dir,
+            shutting_down: AtomicBool::new(false),
+            checkpoint_at: AtomicI64::new(0),
+            restored: AtomicU32::new(0),
+            resumed: AtomicU32::new(0),
+            maintenance: Mutex::new(HashSet::new()),
+            pending_rearm: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// `true` the first time it is called, `false` on every later call. Used to make
+    /// the shutdown sequence idempotent (close button + OS exit + task manager).
+    pub fn begin_shutdown(&self) -> bool {
+        !self.shutting_down.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
     }
 
     // -----------------------------------------------------------------
@@ -192,20 +248,108 @@ impl TorrentEngine {
                 };
 
                 let listen_port = settings.listen_port;
-                match Session::new_with_opts(default_output.clone(), build_opts(listen_port)).await {
-                    Ok(session) => Ok(session),
+                let session = match Session::new_with_opts(default_output.clone(), build_opts(listen_port)).await {
+                    Ok(session) => session,
                     Err(err) => {
                         log::warn!(
                             "listener on port {listen_port} failed ({err}); retrying on an ephemeral port"
                         );
                         Session::new_with_opts(default_output, build_opts(0))
                             .await
-                            .map_err(|e| format!("cannot start BitTorrent session: {e}"))
+                            .map_err(|e| format!("cannot start BitTorrent session: {e}"))?
                     }
-                }
+                };
+
+                // librqbit has just re-added every torrent from `session/<db>` (all of them
+                // paused, because MakeMake always sleeps the swarms before exiting).
+                // Re-arm the ones the user had running last time.
+                self.restore_previous_session(&session).await;
+
+                Ok(session)
             })
             .await
             .cloned()
+    }
+
+    /// Reconcile the restored session with the intent MakeMake saved on exit.
+    ///
+    /// MakeMake's own state file — not librqbit's `is_paused` flag — is the source of
+    /// truth here: every swarm that was running when the app closed is re-armed, and
+    /// everything else is parked. That way a stale or half-written session database can
+    /// never magically re-start a torrent the user had paused.
+    async fn restore_previous_session(&self, session: &Arc<Session>) {
+        let handles = Self::handles(session);
+        self.restored
+            .store(handles.len().min(u32::MAX as usize) as u32, Ordering::SeqCst);
+
+        if handles.is_empty() {
+            log::info!("no torrents to restore");
+            return;
+        }
+
+        let settings = self.settings.read().await.clone();
+        let intents = self.extras.lock().await.clone();
+
+        let mut to_resume: Vec<Arc<ManagedTorrent>> = Vec::new();
+        let mut to_park: Vec<Arc<ManagedTorrent>> = Vec::new();
+        for handle in handles {
+            let was_running = intents
+                .get(&handle.info_hash().as_string())
+                .map(|extras| extras.resume_on_start)
+                .unwrap_or(false);
+            if was_running {
+                to_resume.push(handle);
+            } else {
+                to_park.push(handle);
+            }
+        }
+
+        if !settings.resume_on_launch && !to_resume.is_empty() {
+            log::info!(
+                "restored {} torrent(s) in a dormant state (auto-resume disabled)",
+                to_resume.len()
+            );
+            to_park.append(&mut to_resume);
+        }
+
+        for handle in to_park {
+            if !wants_to_run(&handle) {
+                continue;
+            }
+            if let Err(err) = session.pause(&handle).await {
+                log::debug!(
+                    "cannot park {}: {err}",
+                    handle.info_hash().as_string()
+                );
+            }
+        }
+
+        let mut resumed = 0u32;
+        for handle in to_resume {
+            // The unpause may be deferred: librqbit re-verifies restored data first and
+            // drops requests that arrive mid-check. `collect_items` keeps asking until
+            // the swarm is really live, so counting the intent here is accurate.
+            self.pending_rearm
+                .lock()
+                .await
+                .insert(handle.info_hash().as_string(), RearmStatus::default());
+            match session.unpause(&handle).await {
+                Ok(()) => {
+                    resumed += 1;
+                    log::info!("re-arming {}", handle.info_hash().as_string());
+                }
+                Err(err) => log::warn!(
+                    "cannot resume {}: {err}",
+                    handle.info_hash().as_string()
+                ),
+            }
+        }
+
+        self.resumed.store(resumed, Ordering::SeqCst);
+        log::info!(
+            "restored {} torrent(s); re-armed {resumed}",
+            self.restored.load(Ordering::SeqCst)
+        );
     }
 
     fn handles(session: &Arc<Session>) -> Vec<Arc<ManagedTorrent>> {
@@ -276,12 +420,100 @@ impl TorrentEngine {
         }
         match serde_json::to_vec_pretty(&state) {
             Ok(json) => {
-                if let Err(err) = fs::write(state_file_path(&self.state_dir), json) {
-                    log::warn!("cannot persist MakeMake state: {err}");
+                // Write to a temp file first so a crash mid-write can never leave a
+                // truncated state file behind (that would lose every swarm's flags).
+                let target = state_file_path(&self.state_dir);
+                let tmp = target.with_extension("json.tmp");
+                match fs::write(&tmp, json).and_then(|_| fs::rename(&tmp, &target)) {
+                    Ok(()) => {
+                        self.checkpoint_at.store(now_ms(), Ordering::SeqCst);
+                    }
+                    Err(err) => log::warn!("cannot persist MakeMake state: {err}"),
                 }
             }
             Err(err) => log::warn!("cannot serialize MakeMake state: {err}"),
         }
+    }
+
+    /// Periodic durability checkpoint.
+    ///
+    /// Records which swarms are live right now (so an unexpected crash still knows what
+    /// to re-arm) and rewrites the state file. librqbit writes its own session database
+    /// whenever a torrent is paused/resumed, so a hard kill only ever loses the piece
+    /// flags written since the last `update_metadata`, which fastresume re-verifies.
+    pub async fn checkpoint(&self) {
+        if let Some(session) = self.session.get() {
+            let handles = Self::handles(session);
+            let mut guard = self.extras.lock().await;
+            for handle in handles {
+                // Only ever *promote* the intent here: explicit pauses are recorded by
+                // the pause commands, and a swarm that is mid-re-arm must not lose it.
+                if wants_to_run(&handle) {
+                    let extras = guard.entry(handle.info_hash().as_string()).or_default();
+                    extras.resume_on_start = true;
+                    if extras.created_at == 0 {
+                        extras.created_at = now_ms();
+                    }
+                }
+            }
+            drop(guard);
+        }
+        self.persist_state().await;
+    }
+
+    /// Clean shutdown: remember what was live, then pause **every** swarm.
+    ///
+    /// Pausing is what makes the exit safe: librqbit drops all peer connections and
+    /// flushes the resume database (`session.json`, per-torrent `.bitv` piece maps and
+    /// the raw `.torrent` bytes) atomically before we return. Nothing is left half
+    /// written, so the next launch resumes from exactly where this one stopped.
+    pub async fn shutdown(&self) -> Result<(), String> {
+        self.begin_shutdown();
+        log::info!("sealing session: pausing all swarms before exit");
+
+        if let Some(session) = self.session.get().cloned() {
+            let handles = Self::handles(&session);
+
+            // Snapshot intent *before* pausing, otherwise everything looks dormant.
+            {
+                let mut guard = self.extras.lock().await;
+                for handle in handles.iter() {
+                    if wants_to_run(handle) {
+                        guard
+                            .entry(handle.info_hash().as_string())
+                            .or_default()
+                            .resume_on_start = true;
+                    }
+                }
+            }
+            self.persist_state().await;
+
+            let mut failures = 0usize;
+            for handle in handles.iter() {
+                let stats = handle.stats();
+                log::debug!(
+                    "seal candidate {} state={:?} finished={} paused_flag={}",
+                    handle.info_hash().as_string(),
+                    stats.state,
+                    stats.finished,
+                    handle.is_paused()
+                );
+                if !seal_handle(&session, handle).await {
+                    failures += 1;
+                }
+            }
+
+            // Give the JSON persistence store a beat to fsync its temp files + rename.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+
+            if failures > 0 {
+                log::warn!("{failures} torrent(s) could not be paused cleanly");
+            }
+            log::info!("session sealed; all swarms dormant");
+        }
+
+        self.persist_state().await;
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -302,24 +534,89 @@ impl TorrentEngine {
 
         for handle in handles {
             let info_hash = handle.info_hash().as_string();
-            let stats = handle.stats();
+            let mut stats = handle.stats();
+            let now = now_ms();
 
             let existing = self.extras.lock().await.get(&info_hash).cloned();
             let is_new = existing.is_none();
             let mut extras = existing.unwrap_or_default();
 
-            // Archive the .torrent metadata as soon as librqbit knows it.
-            if settings.auto_backup_enabled && !extras.backed_up {
+            // Only one poll owns a swarm at a time: the UI asks for the torrent list and
+            // the system stats in parallel, and both walk this loop.
+            let owns_vault = !self.is_shutting_down()
+                && self.maintenance.lock().await.insert(info_hash.clone());
+
+            // Self-healing restore: a swarm that was live when the app last closed is
+            // re-added paused and has to re-verify its pieces. librqbit drops unpauses
+            // that arrive while that check is still running (and may re-apply the deferred
+            // pause right after we win), so keep asking until the swarm has been live for
+            // a few consecutive polls. Only swarms the launch-time restore selected are in
+            // this map, so an explicit pause can never be fought by this loop.
+            let awaiting_rearm = owns_vault
+                && self.pending_rearm.lock().await.contains_key(&info_hash);
+            if awaiting_rearm {
+                if is_running(&stats) {
+                    let mut pending = self.pending_rearm.lock().await;
+                    if let Some(entry) = pending.get_mut(&info_hash) {
+                        entry.live_streak += 1;
+                        if entry.live_streak >= 3 {
+                            pending.remove(&info_hash);
+                        }
+                    }
+                } else if !matches!(stats.state, TorrentStatsState::Error) {
+                    let attempt = session.unpause(&handle).await;
+                    stats = handle.stats();
+                    let mut pending = self.pending_rearm.lock().await;
+                    match attempt {
+                        Ok(()) => {
+                            log::debug!(
+                                "re-arm attempt {info_hash}: now {:?} paused_flag={}",
+                                stats.state,
+                                handle.is_paused()
+                            );
+                            if let Some(entry) = pending.get_mut(&info_hash) {
+                                entry.attempts += 1;
+                                entry.live_streak = if is_running(&stats) { 1 } else { 0 };
+                            }
+                        }
+                        Err(err) => {
+                            log::debug!("cannot re-arm {info_hash} yet: {err}");
+                            if let Some(entry) = pending.get_mut(&info_hash) {
+                                entry.attempts += 1;
+                            }
+                        }
+                    }
+                    // Give up after ~2 minutes of polling so a genuinely broken swarm
+                    // cannot spin the loop forever.
+                    if pending
+                        .get(&info_hash)
+                        .map(|entry| entry.attempts > 120)
+                        .unwrap_or(false)
+                    {
+                        pending.remove(&info_hash);
+                        log::warn!("giving up on re-arming {info_hash}");
+                    }
+                }
+            }
+
+            // Temporal auto-backup: archive the raw .torrent — for magnets the bencoded
+            // metadata librqbit fetched from the swarm — into the vault, then keep that
+            // archived copy fresh while the download is still in flight.
+            if owns_vault
+                && settings.auto_backup_enabled
+                && backup_due(&extras, settings.backup_interval_hours, stats.finished, now)
+            {
                 if let Some(path) = self.write_backup_file(&handle, &settings).await {
                     extras.backed_up = true;
                     extras.backup_path = Some(path);
+                    extras.last_backup_at = now;
                     state_changed = true;
                 }
             }
 
-            if stats.finished {
+            if owns_vault && stats.finished {
                 if extras.completed_at.is_none() {
-                    extras.completed_at = Some(now_ms());
+                    extras.completed_at = Some(now);
                     state_changed = true;
                 }
                 if settings.move_completed_torrent_enabled
@@ -328,6 +625,10 @@ impl TorrentEngine {
                 {
                     state_changed = true;
                 }
+            }
+
+            if owns_vault {
+                self.maintenance.lock().await.remove(&info_hash);
             }
 
             if fill_trackers(&handle, &mut extras) {
@@ -341,6 +642,14 @@ impl TorrentEngine {
             {
                 if session.pause(&handle).await.is_ok() {
                     log::debug!("paused finished torrent {info_hash}: seeding disabled");
+                    // Report the pause to the UI and remember that it was deliberate, so
+                    // the launch-time re-arm never fights this policy.
+                    stats = handle.stats();
+                    self.pending_rearm.lock().await.remove(&info_hash);
+                    if extras.resume_on_start {
+                        extras.resume_on_start = false;
+                        state_changed = true;
+                    }
                 }
             }
 
@@ -366,6 +675,8 @@ impl TorrentEngine {
         let mut global_upload_speed = 0u64;
         let mut total_active_peers = 0u32;
         let mut active_torrents = 0usize;
+        let mut paused_torrents = 0usize;
+        let mut completed_torrents = 0usize;
         let mut total_downloaded_all_time = 0u64;
 
         for item in items.iter() {
@@ -375,6 +686,12 @@ impl TorrentEngine {
             total_downloaded_all_time += item.downloaded_bytes;
             if item.status == "Downloading" || item.status == "Seeding" {
                 active_torrents += 1;
+            }
+            if item.status == "Paused" {
+                paused_torrents += 1;
+            }
+            if item.progress >= 100.0 || item.completed_at.is_some() {
+                completed_torrents += 1;
             }
         }
 
@@ -395,7 +712,12 @@ impl TorrentEngine {
             dht_nodes,
             total_torrents: items.len(),
             active_torrents,
+            paused_torrents,
+            completed_torrents,
             total_downloaded_all_time,
+            restored_torrents: self.restored.load(Ordering::SeqCst),
+            resumed_torrents: self.resumed.load(Ordering::SeqCst),
+            checkpoint_at: self.checkpoint_at.load(Ordering::SeqCst),
         }
     }
 
@@ -494,12 +816,15 @@ impl TorrentEngine {
 
         let mut extras = TorrentExtras {
             magnet_uri: preview.magnet_uri.clone(),
+            // A freshly added torrent is started immediately, so remember that intent.
+            resume_on_start: true,
             ..Default::default()
         };
-        if settings.auto_backup_enabled {
-            if let Some(path) = self.write_backup_file(&handle, &settings).await {
-                extras.backed_up = true;
-                extras.backup_path = Some(path);
+        if was_already_managed {
+            // Keep whatever bookkeeping we already have for this swarm.
+            if let Some(previous) = self.extras.lock().await.get(&info_hash).cloned() {
+                extras = previous;
+                extras.resume_on_start = true;
             }
         }
 
@@ -517,20 +842,40 @@ impl TorrentEngine {
         let session = self.session().await?;
         let (_, handle) = Self::find_handle(&session, info_hash)
             .ok_or_else(|| format!("torrent {info_hash} is not managed by this session"))?;
-        session
-            .unpause(&handle)
-            .await
-            .map_err(|e| format!("cannot resume torrent: {e}"))
+        if !is_running(&handle.stats()) {
+            session
+                .unpause(&handle)
+                .await
+                .map_err(|e| format!("cannot resume torrent: {e}"))?;
+        }
+        self.set_resume_intent(info_hash, true).await;
+        Ok(())
     }
 
     pub async fn pause_torrent(&self, info_hash: &str) -> Result<(), String> {
         let session = self.session().await?;
         let (_, handle) = Self::find_handle(&session, info_hash)
             .ok_or_else(|| format!("torrent {info_hash} is not managed by this session"))?;
-        session
-            .pause(&handle)
-            .await
-            .map_err(|e| format!("cannot pause torrent: {e}"))
+        // Already dormant: record the intent, but never ask librqbit to pause twice.
+        if !matches!(handle.stats().state, TorrentStatsState::Paused) {
+            session
+                .pause(&handle)
+                .await
+                .map_err(|e| format!("cannot pause torrent: {e}"))?;
+        }
+        self.set_resume_intent(info_hash, false).await;
+        Ok(())
+    }
+
+    /// Record whether this swarm should be running again after a restart.
+    async fn set_resume_intent(&self, info_hash: &str, running: bool) {
+        {
+            let mut map = self.extras.lock().await;
+            map.entry(info_hash.to_string()).or_default().resume_on_start = running;
+        }
+        // An explicit user action always wins over the launch-time re-arm loop.
+        self.pending_rearm.lock().await.remove(info_hash);
+        self.persist_state().await;
     }
 
     /// Re-verify on-disk data. librqbit hash-checks existing files whenever a torrent is
@@ -587,10 +932,21 @@ impl TorrentEngine {
         let session = self.session().await?;
         let mut failures = 0usize;
         for handle in Self::handles(&session) {
+            // Already dormant in the eyes of the UI: nothing to pause.
+            if matches!(handle.stats().state, TorrentStatsState::Paused) {
+                continue;
+            }
             if session.pause(&handle).await.is_err() {
                 failures += 1;
             }
         }
+        {
+            let mut map = self.extras.lock().await;
+            for extras in map.values_mut() {
+                extras.resume_on_start = false;
+            }
+        }
+        self.pending_rearm.lock().await.clear();
         self.persist_state().await;
         if failures > 0 {
             return Err(format!("{failures} torrent(s) could not be paused"));
@@ -603,8 +959,18 @@ impl TorrentEngine {
         let session = self.session().await?;
         let mut failures = 0usize;
         for handle in Self::handles(&session) {
+            // Already transferring: nothing to do.
+            if is_running(&handle.stats()) {
+                continue;
+            }
             if session.unpause(&handle).await.is_err() {
                 failures += 1;
+            }
+        }
+        {
+            let mut map = self.extras.lock().await;
+            for extras in map.values_mut() {
+                extras.resume_on_start = true;
             }
         }
         self.persist_state().await;
@@ -742,6 +1108,7 @@ impl TorrentEngine {
             let extras = map.entry(info_hash.to_string()).or_default();
             extras.backed_up = true;
             extras.backup_path = Some(path.clone());
+            extras.last_backup_at = now_ms();
         }
         self.persist_state().await;
 
@@ -751,6 +1118,8 @@ impl TorrentEngine {
         })
     }
 
+    /// Write the torrent's raw metadata (`.torrent` bytes — synthesized bencode when the
+    /// torrent was added from a magnet link) into the archive vault.
     async fn write_backup_file(
         &self,
         handle: &Arc<ManagedTorrent>,
@@ -759,8 +1128,16 @@ impl TorrentEngine {
         let torrent_bytes = handle
             .with_metadata(|metadata| metadata.torrent_bytes.clone())
             .ok()?;
+        if torrent_bytes.is_empty() {
+            return None;
+        }
 
-        let dir = PathBuf::from(&settings.backup_dir);
+        let dir = if settings.backup_dir.trim().is_empty() {
+            default_settings(&self.state_dir).backup_dir
+        } else {
+            settings.backup_dir.clone()
+        };
+        let dir = PathBuf::from(dir);
         fs::create_dir_all(&dir).ok()?;
 
         let info_hash = handle.info_hash().as_string();
@@ -771,10 +1148,20 @@ impl TorrentEngine {
             short_hash(&info_hash)
         ));
 
-        fs::write(&file, torrent_bytes.as_ref()).ok()?;
+        // Temp file + rename: an archive file is never observed half-written.
+        let tmp = file.with_extension("torrent.tmp");
+        fs::write(&tmp, torrent_bytes.as_ref()).ok()?;
+        if let Err(err) = fs::rename(&tmp, &file) {
+            log::warn!("cannot archive torrent metadata to {}: {err}", file.display());
+            fs::remove_file(&tmp).ok();
+            return None;
+        }
         Some(file.to_string_lossy().to_string())
     }
 
+    /// Move the archived `.torrent` out of the staging vault into the "completed" vault
+    /// once the payload has fully verified. This is a real move (rename, with a
+    /// copy+delete fallback when the two folders live on different volumes).
     fn move_backup_to_completed(
         &self,
         extras: &mut TorrentExtras,
@@ -784,32 +1171,74 @@ impl TorrentEngine {
             return false;
         };
         let source = PathBuf::from(&backup_path);
-        if !source.is_file() {
-            return false;
-        }
-        let target_dir = PathBuf::from(&settings.completed_torrent_dir);
-        if fs::create_dir_all(&target_dir).is_err() {
-            return false;
-        }
         let Some(file_name) = source.file_name().map(|n| n.to_owned()) else {
             return false;
         };
-        let target = target_dir.join(file_name);
+
+        let completed_dir = if settings.completed_torrent_dir.trim().is_empty() {
+            default_settings(&self.state_dir).completed_torrent_dir
+        } else {
+            settings.completed_torrent_dir.clone()
+        };
+        let target_dir = PathBuf::from(completed_dir);
+        if fs::create_dir_all(&target_dir).is_err() {
+            return false;
+        }
+        let target = target_dir.join(&file_name);
+
         if source == target {
             extras.moved_to_completed = true;
             return false;
         }
-        match fs::copy(&source, &target) {
-            Ok(_) => {
+
+        if !source.is_file() {
+            // The vault copy is already gone — most likely a previous launch relocated it
+            // and the state file kept the staging path. Adopt the completed copy instead
+            // of archiving the swarm a second time.
+            if target.is_file() {
                 extras.backup_path = Some(target.to_string_lossy().to_string());
                 extras.moved_to_completed = true;
-                true
+                return true;
             }
-            Err(err) => {
-                log::warn!("cannot move archived torrent to completed dir: {err}");
-                false
-            }
+            return false;
         }
+
+        let moved = match fs::rename(&source, &target) {
+            Ok(()) => true,
+            Err(_) => {
+                // Cross-volume (or locked) rename: copy, verify, then drop the original.
+                match fs::copy(&source, &target) {
+                    Ok(_) => match fs::remove_file(&source) {
+                        Ok(()) => true,
+                        Err(err) => {
+                            log::warn!(
+                                "archived torrent copied to {} but the vault copy could not be removed: {err}",
+                                target.display()
+                            );
+                            true
+                        }
+                    },
+                    Err(err) => {
+                        log::warn!(
+                            "cannot move archived torrent to {}: {err}",
+                            target.display()
+                        );
+                        false
+                    }
+                }
+            }
+        };
+
+        if moved {
+            log::info!(
+                "moved archived torrent {} -> {}",
+                source.display(),
+                target.display()
+            );
+            extras.backup_path = Some(target.to_string_lossy().to_string());
+        }
+        extras.moved_to_completed = moved;
+        moved
     }
 
     // -----------------------------------------------------------------
@@ -909,6 +1338,68 @@ impl TorrentEngine {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// Is this torrent actively transferring, according to its state machine?
+fn is_running(stats: &TorrentStats) -> bool {
+    match &stats.state {
+        TorrentStatsState::Live => true,
+        TorrentStatsState::Initializing { paused } => !*paused,
+        TorrentStatsState::Paused | TorrentStatsState::Error => false,
+    }
+}
+
+/// What librqbit currently considers this swarm's run intent.
+///
+/// `TorrentStatsState` and the pause flag can briefly disagree while a restored torrent
+/// re-verifies (librqbit clears the flag before applying a deferred pause), so the flag
+/// is the reliable signal for "should this be running".
+fn wants_to_run(handle: &Arc<ManagedTorrent>) -> bool {
+    !handle.is_paused()
+}
+
+/// Park a swarm for the exit: pause it, and force a durable flush even when librqbit
+/// already considers it dormant but has not written that to the resume database.
+async fn seal_handle(session: &Arc<Session>, handle: &Arc<ManagedTorrent>) -> bool {
+    if is_running(&handle.stats()) {
+        return session.pause(handle).await.is_ok();
+    }
+
+    if wants_to_run(handle) {
+        // State says dormant, flag says running: flip it once so pausing actually writes
+        // `is_paused: true` into the session database.
+        let _ = session.unpause(handle).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        return session.pause(handle).await.is_ok();
+    }
+
+    // Genuinely dormant and already persisted: nothing to flush.
+    true
+}
+
+/// Should the archived `.torrent` be (re)written for this torrent right now?
+///
+/// The archive itself is written as soon as librqbit knows the metadata (that is the
+/// whole point: an in-progress magnet must leave a real `.torrent` behind). The
+/// interval only governs how often that snapshot is refreshed while bytes are still
+/// flowing — `0` ("instant") refreshes every 10 minutes, a larger value refreshes at
+/// that cadence. Completed swarms never need a refresh.
+fn backup_due(extras: &TorrentExtras, interval_hours: u32, finished: bool, now: i64) -> bool {
+    if !extras.backed_up {
+        return true;
+    }
+
+    if finished {
+        return false;
+    }
+
+    let refresh_ms = if interval_hours == 0 {
+        600_000
+    } else {
+        interval_hours as i64 * 3_600_000
+    };
+
+    now.saturating_sub(extras.last_backup_at) >= refresh_ms
 }
 
 fn short_hash(info_hash: &str) -> &str {
@@ -1031,6 +1522,7 @@ fn default_settings(state_dir: &Path) -> ClientSettings {
         listen_port: 6881,
         enable_sound_fx: true,
         theme: "cyber-obsidian".to_string(),
+        resume_on_launch: true,
     }
 }
 
@@ -1369,5 +1861,55 @@ mod tests {
         assert!(TorrentEngine::find_handle(&session, &item.info_hash).is_none());
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn backup_due_follows_the_configured_interval() {
+        let mut extras = TorrentExtras {
+            created_at: 0,
+            ..Default::default()
+        };
+
+        // Nothing is archived yet: the very first snapshot happens immediately, whether
+        // the swarm is still leeching or already verified.
+        assert!(backup_due(&extras, 0, false, 1_000));
+        assert!(backup_due(&extras, 6, false, 1_000));
+        assert!(backup_due(&extras, 6, true, 1_000));
+
+        // Once archived, the vault copy refreshes only while the download is in flight.
+        extras.backed_up = true;
+        extras.last_backup_at = 10_000;
+        assert!(!backup_due(&extras, 6, false, 10_000 + 3_600_000));
+        assert!(backup_due(&extras, 6, false, 10_000 + 6 * 3_600_000));
+        assert!(!backup_due(&extras, 6, true, 10_000 + 6 * 3_600_000));
+
+        // "Instant" mode keeps refreshing every 10 minutes.
+        assert!(!backup_due(&extras, 0, false, 10_000 + 60_000));
+        assert!(backup_due(&extras, 0, false, 10_000 + 600_000));
+    }
+
+    #[test]
+    fn legacy_settings_files_still_auto_resume() {
+        // State written by v0.1.0 has no `resumeOnLaunch` / turtle keys at all.
+        let json = r#"{
+            "defaultDownloadDir": "",
+            "alwaysAskDownloadDir": true,
+            "autoBackupEnabled": true,
+            "backupIntervalHours": 6,
+            "backupDir": "",
+            "moveCompletedTorrentEnabled": true,
+            "completedTorrentDir": "",
+            "maxDownloadSpeed": 0,
+            "maxUploadSpeed": 0,
+            "listenPort": 6881,
+            "enableSoundFx": true,
+            "theme": "cyber-obsidian"
+        }"#;
+
+        let settings: ClientSettings = serde_json::from_str(json).expect("legacy settings parse");
+        assert!(settings.resume_on_launch, "defaults must auto-resume");
+        assert!(settings.seed_after_complete);
+        assert!(settings.turtle_download_speed > 0);
+        assert!(settings.always_ask_download_dir);
     }
 }

@@ -42,15 +42,30 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
   * Files are written exactly where you choose; every torrent keeps its own output folder.
 
 ### 2. Temporal Auto-Backup Engine
-* **Automatic `.torrent` Archival**:
-  * For file-based torrents, backs up the raw `.torrent` file to a secure vault directory.
-  * For magnet links, automatically serializes the fetched Bencoded metadata into a standard `.torrent` file and archives it.
-* **Configurable Backup Intervals**:
-  * Options: *Instant*, *1 Hour*, *6 Hours*, *12 Hours*, *24 Hours*, *3 Days*, *7 Days*.
-* **Post-Completion Migration**:
-  * Option to automatically move completed `.torrent` archives into a dedicated `Finished/` vault once the payload reaches 100% hash verification.
+* **Automatic `.torrent` Archival**: the archive is written the moment the engine knows the
+  metadata, so a download that is still in flight already has a real `.torrent` in the vault.
+  * For file-based torrents the raw `.torrent` bytes are archived.
+  * For magnet links MakeMake synthesizes a standard `.torrent` from the Bencoded metadata the
+    swarm returned — no separate "convert" step needed.
+* **Archive Refresh Interval** (*Instant / 1 h / 6 h / 12 h / 24 h / 3 d / 7 d*): controls how
+  often the archived snapshot is refreshed while the payload is still downloading (all writes are
+  temp-file + rename, so an archive is never observed half-written).
+* **Post-Completion Migration**: completed `.torrent` archives are **moved** (not copied) into a
+  dedicated `CompletedTorrents/` vault once the payload reaches 100 % hash verification.
 
-### 3. Sacred Context HUD (Right-Click Context Menu)
+### 3. Session Guard (Crash-Safe Resume)
+* **Pause-on-exit is mandatory**: closing the window (X, Alt+F4, OS shutdown request) first hides
+  the UI, then pauses every swarm — seeding or leeching, complete or not — drops all peer
+  connections and flushes `librqbit`'s resume database (`session.json`, per-torrent `.bitv` piece
+  maps, `.torrent` bytes) before the process exits. Nothing is ever left half-written.
+* **Intent is remembered**: a durability checkpoint is written every 15 s, so even a hard crash
+  still knows which swarms were live. On the next launch those swarms are re-armed automatically
+  (optional) while explicitly paused swarms always stay parked.
+* **Self-healing restore**: a restored swarm has to re-verify its pieces, and `librqbit` defers
+  (and occasionally re-applies) a pause that lands mid-check — so MakeMake keeps re-arming until
+  the swarm has been stably live, with a bounded retry budget.
+
+### 4. Sacred Context HUD (Right-Click Context Menu)
 * Comprehensive operational menu for each data monolith:
   * ⚡ **Awaken (Resume/Start)** / ⏸ **Dormant (Pause)**: Start or choke the swarm connection.
   * 🔄 **Verify Obsidian Integrity (Force Recheck)**: Recalculate piece hashes against the local disk payload.
@@ -64,14 +79,17 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
   * 💥 **Purge Monolith & Files** — irreversible, behind the hazard modal.
 * Header actions: **Pause all / Resume all**. Status bar: **turtle throttle** toggle.
 
-### 4. Safety Gates & Irreversible Action Modals
+### 5. Safety Gates & Irreversible Action Modals
 * Removal and deletion actions are protected by a cyberpunk hazard dialogue detailing exact file paths and sizes to prevent accidental data loss.
 
-### 5. Cyber-Polynesian UI Gizmos
-* **Swarm Astrolabe**: Interactive celestial/swell radar visualizing peer nodes, ping latencies, and geographic distribution.
+### 6. Cyber-Polynesian UI Gizmos
+* **Swarm Astrolabe**: the radar plots every managed swarm for real — the bearing is derived from the
+  info hash, the radius is the verified completion of that swarm (rim = 0 %, core = 100 %), and the
+  colour is its live engine state (leech / seed / paused / error). Hover a blip for its name,
+  progress and status; the footer carries live down/up rates plus peer and DHT counts.
 * **Ahu Block Matrix**: Visual piece picker and block allocation map styled as an obsidian stone mosaic.
 * **Caldera Fluid Gauges**: Circular fluid vector dials displaying download/upload bandwidth and disk cache saturation.
-* **Rongorongo Decryptor**: Live streaming cyber-petroglyphs rendering DHT queries, peer handshakes, and tracker announces.
+* **Rongorongo Decryptor**: Live event stream rendering real engine state changes (adds, pauses, checks, completions).
 
 ---
 

@@ -81,6 +81,8 @@ export interface ClientSettings {
   listenPort: number;
   enableSoundFx: boolean;
   theme: 'cyber-obsidian' | 'neon-caldera' | 'solar-birdman';
+  /** Re-arm the swarms that were running when the app was last closed. */
+  resumeOnLaunch: boolean;
 }
 
 export interface SystemStats {
@@ -90,5 +92,13 @@ export interface SystemStats {
   dhtNodes: number;
   totalTorrents: number;
   activeTorrents: number;
+  pausedTorrents: number;
+  completedTorrents: number;
   totalDownloadedAllTime: number;
+  /** Torrents the engine restored from its session database on this launch. */
+  restoredTorrents: number;
+  /** Of those, the ones re-armed automatically. */
+  resumedTorrents: number;
+  /** Unix ms of the last durable state checkpoint. */
+  checkpointAt: number;
 }

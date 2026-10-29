@@ -47,7 +47,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   return (
-    <aside className="w-80 border-r border-slate-800/80 bg-obsidian-950/70 flex flex-col justify-between p-3 select-none overflow-y-auto">
+    <aside className="w-80 border-r border-slate-800/80 bg-obsidian-950 flex flex-col justify-between p-3 select-none overflow-y-auto">
       {/* Top Filter Navigation */}
       <div className="space-y-4">
         <div>
@@ -87,9 +87,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        {/* Swarm Astrolabe Radar Gizmo */}
+        {/* Swarm Astrolabe Radar Gizmo (real per-swarm telemetry) */}
         <div>
-          <SwarmAstrolabe activeTorrentName={selectedTorrentName} activePeers={activePeers} />
+          <SwarmAstrolabe
+            activeTorrentName={selectedTorrentName}
+            activePeers={activePeers}
+            torrents={torrents}
+            stats={stats}
+          />
         </div>
       </div>
 
@@ -105,7 +110,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
               dhtNodes: 0,
               totalTorrents: torrents.length,
               activeTorrents: 0,
+              pausedTorrents: 0,
+              completedTorrents: 0,
               totalDownloadedAllTime: 0,
+              restoredTorrents: 0,
+              resumedTorrents: 0,
+              checkpointAt: 0,
             }
           }
         />

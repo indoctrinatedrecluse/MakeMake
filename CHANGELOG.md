@@ -4,6 +4,56 @@ All notable changes to **MakeMake // Rapa Nui Cyberpunk BitTorrent Engine** are 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.1] — 2026-10-29
+
+Session-safety release: every exit now seals the swarm cleanly, the vault engine does what its
+settings claim, and the Astrolabe finally says something useful.
+
+### Added — Session Guard (crash-safe resume)
+- **Pause-on-exit**: window close, Alt+F4 and OS shutdown requests are intercepted, the UI hides
+  immediately, and every swarm (seeding or leeching, complete or not) is paused so `librqbit`
+  flushes its resume database — `session.json`, per-torrent `.bitv` piece maps and the raw
+  `.torrent` bytes — before the process exits. A wedged tracker can never trap the app: the seal
+  is bounded at 8 s and then exits anyway.
+- **Durability checkpoint every 15 s** recording which swarms were live, so a hard kill (power
+  loss, task manager) still resumes correctly next launch.
+- **Auto-resume on launch** (`Settings → Session Guard`): swarms that were running when the app
+  closed are re-armed; explicitly paused swarms always stay paused.
+- **Self-healing re-arm**: a restored swarm re-verifies its pieces and `librqbit` defers — and can
+  re-apply — an unpause that lands mid-check, so MakeMake retries (bounded) until the swarm has
+  been stably live for three polls.
+- Atomic state-file writes (temp file + rename) so a crash can never truncate
+  `makemake-state.json`.
+- Footer shows `STATE SEALED: hh:mm:ss` (last durable checkpoint) plus a live swarm census;
+  a toast announces a recovered session on launch.
+
+### Fixed — Temporal auto-backup vault
+- The archive is now written as soon as the metadata is known (magnet links included), instead of
+  waiting for the whole interval — a download in progress always has a real `.torrent` in the
+  vault. The interval is now an **archive refresh interval** while bytes are still flowing.
+- Post-completion relocation is a genuine **move** (`rename`, copy + delete across volumes)
+  instead of a copy that left the staging vault populated forever.
+- Stale `backupPath` values left over from a relocation are self-healed instead of silently
+  pointing at a file that no longer exists.
+- Archive writes are temp-file + rename and per-torrent serialised (the UI polls the list and the
+  stats concurrently).
+
+### Fixed — client behaviour
+- `pause`, `resume`, `pause_all`, `resume_all` and the exit seal no longer report spurious
+  "torrent is already paused / already live" errors.
+- `Settings` save is wrapped in error handling (a failed commit now shows a themed toast instead
+  of an unhandled rejection).
+
+### Changed — Swarm Astrolabe
+- No more overlapping labels: the header is a single flex row with a `LIVE / DORMANT / STANDBY`
+  badge, and the decorative "bearing" text is gone.
+- The dial now plots **real swarms**: bearing from the info hash, radius = verified completion
+  (rim = 0 %, core = 100 %, ring labels are percentages), colour = engine state (leech, seed,
+  paused, error), pulse rate scaled by transfer speed, selected swarm ringed in gold.
+- Hover readout shows the swarm name, exact progress and status; legend counts leeches / seeds /
+  paused; footer shows live down/up rates and peers / DHT nodes.
+- The left pane is fully opaque (`bg-obsidian-950`) so it matches the top HUD even while empty.
+
 ## [v0.1.0] — 2026-10-29
 
 First public proof-of-concept release: a working desktop BitTorrent client (Tauri v2 + React +

@@ -89,6 +89,13 @@ pub struct ClientSettings {
     pub listen_port: u16,
     pub enable_sound_fx: bool,
     pub theme: String,
+    /// Re-start the torrents that were active when the app was last closed.
+    ///
+    /// MakeMake always pauses every swarm before exiting (so no partially written
+    /// piece is ever committed); this flag decides whether those swarms are
+    /// re-armed on the next launch or left dormant.
+    #[serde(default = "default_true")]
+    pub resume_on_launch: bool,
 }
 
 fn default_true() -> bool {
@@ -142,5 +149,13 @@ pub struct SystemStats {
     pub dht_nodes: u32,
     pub total_torrents: usize,
     pub active_torrents: usize,
+    pub paused_torrents: usize,
+    pub completed_torrents: usize,
     pub total_downloaded_all_time: u64,
+    /// Torrents librqbit restored from its session database on this launch.
+    pub restored_torrents: u32,
+    /// Of those, the ones MakeMake re-armed automatically.
+    pub resumed_torrents: u32,
+    /// Unix ms of the last durable state checkpoint written to disk.
+    pub checkpoint_at: i64,
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { Sidebar, TorrentFilter } from './components/Sidebar';
 import { TorrentList } from './components/TorrentList';
@@ -40,6 +40,7 @@ export const App: React.FC = () => {
     listenPort: 6881,
     enableSoundFx: true,
     theme: 'cyber-obsidian',
+    resumeOnLaunch: true,
   });
 
   const [stats, setStats] = useState<SystemStats>({
@@ -49,7 +50,12 @@ export const App: React.FC = () => {
     dhtNodes: 0,
     totalTorrents: 0,
     activeTorrents: 0,
+    pausedTorrents: 0,
+    completedTorrents: 0,
     totalDownloadedAllTime: 0,
+    restoredTorrents: 0,
+    resumedTorrents: 0,
+    checkpointAt: 0,
   });
 
   // Modal States
@@ -100,6 +106,7 @@ export const App: React.FC = () => {
   });
 
   // Sync state from Tauri backend / dev engine
+  const restoreAnnouncedRef = useRef(false);
   const refreshData = useCallback(async () => {
     try {
       const [torrentList, sysStats] = await Promise.all([
@@ -108,6 +115,17 @@ export const App: React.FC = () => {
       ]);
       setTorrents(torrentList);
       setStats(sysStats);
+
+      // Announce a recovered session exactly once per launch.
+      if (!restoreAnnouncedRef.current && sysStats.restoredTorrents > 0) {
+        restoreAnnouncedRef.current = true;
+        const resumed = sysStats.resumedTorrents;
+        showToast(
+          resumed > 0
+            ? `Session recovered: ${sysStats.restoredTorrents} swarm${sysStats.restoredTorrents === 1 ? '' : 's'} restored · ${resumed} re-armed`
+            : `Session recovered: ${sysStats.restoredTorrents} swarm${sysStats.restoredTorrents === 1 ? '' : 's'} restored in dormant state (auto-resume off)`,
+        );
+      }
 
       // Keep selectedTorrent updated with latest piece/speed changes
       if (selectedTorrent) {
@@ -119,7 +137,7 @@ export const App: React.FC = () => {
     } catch (e) {
       console.warn('Error refreshing MakeMake state', e);
     }
-  }, [selectedTorrent]);
+  }, [selectedTorrent, showToast]);
 
   useEffect(() => {
     TauriBridge.getSettings()
@@ -426,10 +444,15 @@ export const App: React.FC = () => {
 
   const handleSaveSettings = async (newSettings: ClientSettings) => {
     cyberAudio.playClick();
-    const updated = await TauriBridge.updateSettings(newSettings);
-    setSettings(updated);
-    setSoundEnabled(updated.enableSoundFx);
-    cyberAudio.enabled = updated.enableSoundFx;
+    try {
+      const updated = await TauriBridge.updateSettings(newSettings);
+      setSettings(updated);
+      setSoundEnabled(updated.enableSoundFx);
+      cyberAudio.enabled = updated.enableSoundFx;
+      showToast('Vault configuration committed');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
   };
 
   const handleToggleSound = () => {

@@ -153,14 +153,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
             <p className="text-[11px] font-mono text-slate-400">
-              Automatically backs up raw .torrent files (and synthesizes standard .torrent bencode files for magnet links) to your secure archive vault after the chosen duration.
+              Archives the raw .torrent of every download the moment its metadata is known — and,
+              for magnet links, synthesizes a standard .torrent from the metadata fetched out of
+              the swarm — into your vault. The interval below only controls how often that archived
+              copy is refreshed while the download is still in progress.
             </p>
 
             {formData.autoBackupEnabled && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-800/80">
                 <div>
                   <label className="block text-[11px] font-mono text-slate-300 mb-1">
-                    BACKUP TRIGGER INTERVAL:
+                    ARCHIVE REFRESH INTERVAL:
                   </label>
                   <select
                     value={formData.backupIntervalHours}
@@ -169,7 +172,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     }
                     className="w-full px-3 py-1.5 rounded bg-obsidian-900 border border-slate-700 font-mono text-xs text-cyber-cyan focus:outline-none focus:border-cyber-cyan"
                   >
-                    <option value={0}>⚡ Immediate (Upon Swarm Ingestion)</option>
+                    <option value={0}>⚡ Instant (every 10 minutes)</option>
                     <option value={1}>1 Hour</option>
                     <option value={6}>6 Hours (Recommended)</option>
                     <option value={12}>12 Hours</option>
@@ -224,7 +227,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
             <p className="text-[11px] font-mono text-slate-400">
-              When a download reaches 100% verified status, automatically move its corresponding .torrent file to a dedicated &quot;Completed&quot; archive vault.
+              When a download reaches 100% verified status, the archived .torrent is physically
+              moved (not copied) out of the staging vault into a dedicated &quot;Completed&quot;
+              archive vault — so the two folders always tell you which swarms are still in flight.
             </p>
 
             {formData.moveCompletedTorrentEnabled && (
@@ -349,6 +354,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="text-[10px] font-mono text-slate-500 leading-relaxed">
               Throttles are applied live to the librqbit session. The turtle profile can be toggled
               from the status bar without touching these caps.
+            </div>
+          </div>
+
+          {/* Section 4b: Session Guard (crash-safe resume) */}
+          <div className="p-4 rounded-lg bg-obsidian-950/80 border border-cyber-green/30 space-y-3">
+            <div className="flex items-center space-x-2 text-xs font-mono font-bold text-cyber-green">
+              <ShieldCheck className="w-4 h-4" />
+              <span>SESSION GUARD (CRASH-SAFE RESUME)</span>
+            </div>
+
+            <p className="text-[11px] font-mono text-slate-400">
+              On every exit — the window&apos;s close button, Alt+F4 or an OS shutdown request —
+              MakeMake pauses each swarm (seeding or leeching, complete or not), drops every peer
+              connection and flushes librqbit&apos;s resume database (piece map, `.torrent` bytes and
+              pause flags) before the process ends. Nothing is ever left half-written, so damaged
+              data cannot come from a normal close.
+            </p>
+
+            <div className="flex items-center justify-between p-2.5 rounded bg-obsidian-900/60 border border-slate-800">
+              <div className="text-[11px] font-mono text-slate-300">
+                AUTO-RESUME LAST ACTIVE SWARMS ON LAUNCH
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={formData.resumeOnLaunch}
+                  onChange={(e) =>
+                    setFormData({ ...formData, resumeOnLaunch: e.target.checked })
+                  }
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-cyber-green" />
+              </label>
+            </div>
+
+            <div className="text-[10px] font-mono text-slate-500 leading-relaxed">
+              A durability checkpoint is written every 15&nbsp;seconds, so even a hard crash (power
+              loss, task manager kill) still remembers which swarms were live. Swarms that were
+              paused when the app closed always stay paused.
             </div>
           </div>
 

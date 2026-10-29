@@ -12,6 +12,8 @@ import {
   List,
   Film,
   Turtle,
+  Lock,
+  Layers,
 } from 'lucide-react';
 import { ClientSettings, SystemStats } from '../types/torrent';
 
@@ -52,8 +54,19 @@ export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
   };
 
-  const backupLabel =
-    backupIntervalHours === 0 ? 'INSTANT' : `${backupIntervalHours}H INTERVAL`;
+  const backupLabel = !settings.autoBackupEnabled
+    ? 'DISABLED'
+    : backupIntervalHours === 0
+    ? 'LIVE · 10M REFRESH'
+    : `LIVE · ${backupIntervalHours}H REFRESH`;
+
+  // Durable checkpoint timestamp coming from the Rust engine (session seal).
+  const checkpointLabel = React.useMemo(() => {
+    if (!stats.checkpointAt) return 'PENDING';
+    const stamp = new Date(stats.checkpointAt);
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    return `${pad(stamp.getHours())}:${pad(stamp.getMinutes())}:${pad(stamp.getSeconds())}`;
+  }, [stats.checkpointAt]);
 
   const formatLimit = (bytesPerSec: number) =>
     bytesPerSec > 0 ? `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s` : '∞';
@@ -81,6 +94,31 @@ export const FooterStatusBar: React.FC<FooterStatusBarProps> = ({
         </div>
 
         <div className="h-3.5 w-[1px] bg-slate-800 hidden sm:block" />
+
+        {/* Crash-safe session checkpoint */}
+        <div
+          className="hidden md:flex items-center space-x-1.5 text-cyber-green"
+          title="Every swarm is paused and its resume data flushed on exit. This is the timestamp of the last durable checkpoint."
+        >
+          <Lock className="w-3.5 h-3.5" />
+          <span>
+            STATE SEALED: <strong>{checkpointLabel}</strong>
+          </span>
+        </div>
+
+        <div className="h-3.5 w-[1px] bg-slate-800 hidden lg:block" />
+
+        {/* Swarm census */}
+        <div className="hidden lg:flex items-center space-x-1.5 text-slate-400">
+          <Layers className="w-3.5 h-3.5" />
+          <span>
+            SWARMS: <strong className="text-cyber-cyan">{stats.activeTorrents}</strong> LIVE /{' '}
+            <strong className="text-slate-200">{stats.pausedTorrents}</strong> DORMANT /{' '}
+            <strong className="text-cyber-green">{stats.completedTorrents}</strong> VERIFIED
+          </span>
+        </div>
+
+        <div className="h-3.5 w-[1px] bg-slate-800 hidden lg:block" />
 
         {/* All-time data */}
         <div className="hidden sm:flex items-center space-x-1.5 text-slate-400">

@@ -46,6 +46,7 @@ const DEFAULT_SETTINGS: ClientSettings = {
   listenPort: 6881,
   enableSoundFx: true,
   theme: 'cyber-obsidian',
+  resumeOnLaunch: true,
 };
 
 class DevStore {
@@ -215,6 +216,8 @@ class DevStore {
     let globalUploadSpeed = 0;
     let totalActivePeers = 0;
     let activeTorrents = 0;
+    let pausedTorrents = 0;
+    let completedTorrents = 0;
     let totalDownloadedAllTime = 0;
 
     for (const t of this.torrents) {
@@ -223,6 +226,8 @@ class DevStore {
       totalActivePeers += t.peersConnected;
       totalDownloadedAllTime += t.downloadedBytes;
       if (t.status === 'Downloading' || t.status === 'Seeding') activeTorrents += 1;
+      if (t.status === 'Paused') pausedTorrents += 1;
+      if (t.progress >= 100 || t.completedAt) completedTorrents += 1;
     }
 
     return {
@@ -232,7 +237,12 @@ class DevStore {
       dhtNodes: 0,
       totalTorrents: this.torrents.length,
       activeTorrents,
+      pausedTorrents,
+      completedTorrents,
       totalDownloadedAllTime,
+      restoredTorrents: 0,
+      resumedTorrents: 0,
+      checkpointAt: Date.now(),
     };
   }
 }
