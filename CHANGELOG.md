@@ -4,6 +4,15 @@ All notable changes to **MakeMake // Rapa Nui Cyberpunk BitTorrent Engine** are 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Apache-2.0 licensing**: `LICENSE` carries the verbatim Apache License 2.0 text with the
+  copyright notice appended, and `NOTICE` provides the attribution. The `Apache-2.0` SPDX
+  identifier plus `Copyright 2026 Abhishek Mitra (indoctrinatedrecluse)` are declared in
+  `package.json`, `src-tauri/Cargo.toml` and the Tauri bundle, so the installed executable's
+  version resource and the NSIS installer surface the same terms.
+
 ## [v0.1.1] — 2026-10-29
 
 Session-safety release: every exit now seals the swarm cleanly, the vault engine does what its

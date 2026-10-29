@@ -2,7 +2,9 @@
 name = "makemake"
 version = "0.1.1"
 description = "MakeMake // Rapa Nui Cyberpunk BitTorrent Engine"
-authors = ["Recluse"]
+authors = ["Abhishek Mitra (indoctrinatedrecluse)"]
+license = "Apache-2.0"
+repository = "https://github.com/indoctrinatedrecluse/MakeMake"
 edition = "2021"
 
 [features]

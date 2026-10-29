@@ -197,3 +197,25 @@ npm run tauri dev
 # Production Build
 npm run build
 ```
+# Production Build
+npm run build
+```
+
+## 📜 License
+
+MakeMake is released under the **Apache License, Version 2.0**.
+
+```
+Copyright 2026 Abhishek Mitra (indoctrinatedrecluse)
+```
+
+* Full terms: [`LICENSE`](LICENSE) — the verbatim Apache 2.0 text with the copyright notice appended.
+* Attribution: [`NOTICE`](NOTICE).
+* SPDX identifier: `Apache-2.0` (also declared in `package.json`, `src-tauri/Cargo.toml` and the
+  Windows bundle, so the installed executable and the NSIS installer carry the same terms).
+
+You may use, modify and redistribute this software — including commercially — provided you keep
+the license and copyright notices, state significant changes, and include a copy of the license.
+The software is provided **"AS IS", without warranties or conditions of any kind**; see Sections
+7 and 8 of the license for the full disclaimer and limitation of liability.
+
