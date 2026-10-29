@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -208,6 +208,10 @@ impl PendingAdd {
             self.name.clone()
         };
 
+        // The payload is written into a folder of its own (see [`payload_dir`]), so show where
+        // it will land rather than the parent download folder the user picked.
+        let download_dir = self.output_dir.join(sanitize_file_name(&name));
+
         TorrentItem {
             id: self.info_hash.clone(),
             name,
@@ -229,7 +233,7 @@ impl PendingAdd {
             seeds_connected: 0,
             seeds_total: 0,
             eta_seconds: None,
-            download_dir: self.output_dir.to_string_lossy().to_string(),
+            download_dir: download_dir.to_string_lossy().to_string(),
             files: self.files.clone(),
             piece_count: self.piece_count,
             pieces_completed: 0,
@@ -1430,15 +1434,11 @@ impl TorrentEngine {
             .name_or_else(|| format!("Torrent {}", short_hash(&info_hash)))
             .into_owned();
 
-        // Multi-file torrents get their own folder, exactly like librqbit's default output
-        // layout: dropping 14 payload files straight into the chosen directory collides with
-        // other torrents (and with the user's own files).
-        let multi_file = info.iter_file_details().count() > 1;
-        let output_dir = if multi_file {
-            base_dir.join(sanitize_file_name(&name))
-        } else {
-            base_dir.to_path_buf()
-        };
+        // Every torrent is written into its own folder, named after the torrent itself, so a
+        // payload never lands loose in the download folder next to other torrents (or the
+        // user's own files). See [`payload_dir`].
+        let payload = payload_files(&info, None);
+        let output_dir = payload_dir(base_dir, &name, &payload);
         fs::create_dir_all(&output_dir)
             .map_err(|e| format!("cannot create {}: {e}", output_dir.display()))?;
 
@@ -1446,7 +1446,6 @@ impl TorrentEngine {
         // initialisation extends *all* of a torrent's files (measured on a restored
         // 133 GiB torrent, files outside `only_files` were extended too), and any file that
         // is not already sparse gets allocated densely.
-        let payload = payload_files(&info, None);
         let total_bytes = info.lengths().total_length();
 
         // Pre-creation is pure blocking filesystem work (one open + one ioctl per file), so
@@ -2351,6 +2350,41 @@ fn sanitize_file_name(name: &str) -> String {
     trimmed.trim_end().to_string()
 }
 
+/// The folder a torrent's payload is written to: `<download folder>/<torrent name>`.
+///
+/// Every torrent keeps its output in a folder of its own — the folder is named after the
+/// torrent's `name` from its metadata, which is the same title the UI shows. Without it, a
+/// multi-file torrent drops its files straight into the chosen download folder, where they
+/// collide with other torrents, with restored partial downloads, and with the user's own
+/// files. This mirrors librqbit's own default layout (`output_folder` + the torrent name),
+/// which MakeMake cannot use directly because it passes an explicit `output_folder` for the
+/// per-add destination prompt.
+///
+/// The one exception is a torrent whose file paths already begin with their own name
+/// (`Name/…`, which some trackers produce): the payload then nests itself, and another
+/// `Name` folder would only add a redundant `Name/Name/…` level.
+fn payload_dir(base_dir: &Path, name: &str, payload: &[(PathBuf, u64)]) -> PathBuf {
+    let folder = sanitize_file_name(name);
+
+    let already_nested = !payload.is_empty()
+        && payload.iter().all(|(path, _)| {
+            let mut components = path.components();
+            match components.next() {
+                Some(Component::Normal(first)) => {
+                    components.next().is_some()
+                        && sanitize_file_name(&first.to_string_lossy()) == folder
+                }
+                _ => false,
+            }
+        });
+
+    if already_nested {
+        base_dir.to_path_buf()
+    } else {
+        base_dir.join(folder)
+    }
+}
+
 fn default_settings(state_dir: &Path) -> ClientSettings {
     let default_download = dirs::download_dir()
         .map(|p| p.join("MakeMake"))
@@ -2696,6 +2730,73 @@ mod tests {
         );
     }
 
+    /// Every torrent is written into a folder named after itself — single-file torrents too,
+    /// which used to be dropped loose into the download folder.
+    #[test]
+    fn payloads_land_in_a_folder_named_after_the_torrent() {
+        let base = Path::new("C:/Downloads/MakeMake");
+
+        // Multi-file torrent with flat paths, i.e. the `Cyberpunk 2077 [DODI Repack]` layout.
+        let flat = [
+            (PathBuf::from("Chinese.doi"), 10u64),
+            (PathBuf::from("data1.doi"), 20),
+        ];
+        assert_eq!(
+            payload_dir(base, "Cyberpunk 2077 [DODI Repack]", &flat),
+            base.join("Cyberpunk 2077 [DODI Repack]")
+        );
+
+        // Single-file torrents are no longer left lying in the download folder.
+        let single = [(PathBuf::from("ubuntu-24.04-desktop-amd64.iso"), 42u64)];
+        assert_eq!(
+            payload_dir(base, "ubuntu-24.04-desktop-amd64.iso", &single),
+            base.join("ubuntu-24.04-desktop-amd64.iso")
+        );
+
+        // A torrent that already carries sub-folders keeps them *below* its own folder.
+        let nested = [
+            (PathBuf::from("Season 01/episode-01.mkv"), 1u64),
+            (PathBuf::from("Season 01/episode-02.mkv"), 2),
+        ];
+        assert_eq!(
+            payload_dir(base, "Some Show", &nested),
+            base.join("Some Show")
+        );
+    }
+
+    /// A torrent whose paths already start with their own name must not be nested twice.
+    #[test]
+    fn payloads_are_not_nested_twice() {
+        let base = Path::new("C:/Downloads/MakeMake");
+
+        let nested = [
+            (PathBuf::from("Some Show/Season 01/e01.mkv"), 1u64),
+            (PathBuf::from("Some Show/Season 01/e02.mkv"), 2),
+        ];
+        assert_eq!(payload_dir(base, "Some Show", &nested), base);
+
+        // One file outside that leading folder means the payload would land in two places,
+        // so the torrent folder is still required.
+        let mixed = [
+            (PathBuf::from("Some Show/Season 01/e01.mkv"), 1u64),
+            (PathBuf::from("notes.txt"), 2),
+        ];
+        assert_eq!(
+            payload_dir(base, "Some Show", &mixed),
+            base.join("Some Show")
+        );
+    }
+
+    /// The payload folder can never be placed outside the folder the user picked.
+    #[test]
+    fn payload_folder_cannot_escape_the_download_folder() {
+        let base = Path::new("C:/Downloads/MakeMake");
+        let flat = [(PathBuf::from("payload.bin"), 1u64)];
+
+        let dir = payload_dir(base, "../../Windows/System32", &flat);
+        assert_eq!(dir.parent(), Some(base), "got {}", dir.display());
+    }
+
     /// Minimal single-file BitTorrent v1 metadata:
     /// `{ info: { length: 5, name: "test.txt", piece length: 16384, pieces: <20 bytes> } }`
     fn sample_torrent_bencode() -> Vec<u8> {
@@ -2970,6 +3071,80 @@ mod tests {
         assert!(payload_files(&info, Some(&[1])).is_empty());
 
         assert_eq!(payload_files(&info, Some(&[2])), vec![(PathBuf::from("c.txt"), 9)]);
+    }
+
+    /// End-to-end: the folder handed to librqbit is the folder the payload lands in, and
+    /// nothing is written beside it into the shared download folder.
+    #[tokio::test]
+    async fn torrents_write_their_payload_into_their_own_folder() {
+        let root = std::env::temp_dir().join(format!("makemake-layout-{}", std::process::id()));
+        let base = root.join("downloads");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&base).unwrap();
+
+        let bytes = multi_file_torrent_bencode();
+        let parsed = torrent_from_bytes(&bytes).expect("sample must parse");
+        let info = parsed.info.data.validate().expect("sample must validate");
+        let name = info.name().expect("sample carries a name").into_owned();
+        let payload = payload_files(&info, None);
+
+        // The sample's paths (`a.txt`, `c.txt`) are flat, so the torrent gets its own folder.
+        let output = payload_dir(&base, &name, &payload);
+        assert_eq!(output, base.join("dir"));
+
+        let session = Session::new_with_opts(
+            base.clone(),
+            SessionOptions {
+                dht: None,
+                persistence: None,
+                listen: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("offline session should start");
+
+        // Deliberately *not* pre-created: librqbit has to create the payload itself, so this
+        // also proves it honours the explicit `output_folder` instead of the session default.
+        let response = session
+            .add_torrent(
+                AddTorrent::from_bytes(bytes),
+                Some(AddTorrentOptions {
+                    paused: true,
+                    overwrite: true,
+                    output_folder: Some(output.to_string_lossy().to_string()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("torrent should be added");
+
+        let handle = match response {
+            AddTorrentResponse::Added(_, handle)
+            | AddTorrentResponse::AlreadyManaged(_, handle) => handle,
+            _ => panic!("expected the torrent to be added"),
+        };
+        assert_eq!(handle.output_folder(), output.as_path());
+
+        // Payload files are opened (and extended) by librqbit's background initialisation.
+        let nested = output.join("a.txt");
+        for _ in 0..100 {
+            if fs::metadata(&nested).map(|m| m.len()).unwrap_or(0) == 5 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        assert!(
+            nested.is_file(),
+            "the payload must be written inside the torrent folder"
+        );
+        assert!(
+            !base.join("a.txt").exists(),
+            "no payload file may land in the shared download folder"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

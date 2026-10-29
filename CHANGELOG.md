@@ -4,6 +4,34 @@ All notable changes to **MakeMake // Rapa Nui Cyberpunk BitTorrent Engine** are 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.5] — 2026-10-29
+
+Layout release. Every torrent now downloads into a folder of its own, named after the torrent,
+instead of dropping its files into the folder that was picked for it.
+
+### Changed
+- **A dedicated folder per torrent.** The payload is written to
+  `<chosen download folder>/<torrent name>`, using the same title the UI shows (sanitised for
+  Windows: `\ / : * ? " < > |` replaced, device names such as `CON` neutralised, trailing dots and
+  spaces dropped). Until now only multi-file torrents were nested; a single-file torrent was left
+  loose in the download folder next to every other torrent and the user's own files. The layout now
+  matches librqbit's own default, which MakeMake cannot use directly because it passes an explicit
+  `output_folder` for the per-add destination prompt.
+- **No double nesting.** A torrent whose file paths already begin with their own name
+  (`Name/…`, which some trackers produce) is written to `<chosen folder>/Name/…` instead of
+  `Name/Name/…`. The check looks at every payload file, so a torrent that mixes nested and flat
+  paths still gets its folder.
+- **Queued magnets report the real destination.** A `Resolving` row in the list shows the folder
+  the payload will land in, not the parent folder that was picked.
+- **Torrents added before v0.1.5 keep their existing folder.** Re-parenting a payload that is
+  already on disk would mean re-creating and re-hashing it, so the new layout applies to newly
+  added torrents.
+
+### Tests
+- Payload folder placement: multi-file torrents with flat paths, single-file torrents, torrents
+  that already carry sub-folders, the no-double-nesting guard (including the mixed case), and the
+  hostile-name case that must never escape the chosen download folder.
+
 ## [v0.1.4] — 2026-10-29
 
 Engine-hardening release. Two small, well-tested crates replace hand-rolled code where the

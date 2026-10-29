@@ -39,7 +39,8 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
     swarm returns metadata for a magnet link.
   * The global default download location can be **left empty/unset** ("Clear" in Settings) — then
     MakeMake always asks, and falls back to the OS Downloads folder if the picker is cancelled.
-  * Files are written exactly where you choose; every torrent keeps its own output folder.
+  * Files are written exactly where you choose; every torrent then gets its own folder inside it,
+    named after the torrent (single-file torrents included).
 
 ### 2. Temporal Auto-Backup Engine
 * **Automatic `.torrent` Archival**: the archive is written the moment the engine knows the
