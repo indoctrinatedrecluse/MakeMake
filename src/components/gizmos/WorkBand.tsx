@@ -134,6 +134,10 @@ export interface HiddenWork {
  * denominator get a crawling indefinite bar rather than a fake percentage.
  */
 export const deriveHiddenWork = (torrent: TorrentItem): HiddenWork | null => {
+  // A failed magnet is still a queue entry (`resolving: true`) but nothing is running: the row
+  // already carries the error badge and message, so no "working" band belongs on it.
+  if (torrent.status === 'Error') return null;
+
   switch (torrent.status) {
     case 'Deleting':
       return {
