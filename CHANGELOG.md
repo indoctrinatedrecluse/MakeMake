@@ -4,6 +4,109 @@ All notable changes to **MakeMake // Rapa Nui Cyberpunk BitTorrent Engine** are 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [v0.1.7] — 2026-10-30
+
+Correctness release for the three things that made v0.1.6 feel broken: the seed/leech numbers were
+fabricated, the context-menu actions could freeze the window, and "Purge" never proved it deleted
+anything. It also gives every kind of *invisible* work a visible pulse, and stops the one-second
+poll from carrying the entire library's file manifests.
+
+### Added
+- **Real seed / leecher counts per torrent.** librqbit exposes no swarm sizes at all (its stats only
+  carry the peers *this* client is connected to), so MakeMake now scrapes the torrent's trackers
+  itself — HTTP(S) per BEP-48 (`/announce` → `/scrape`) and UDP per BEP-15 — merges the answers with
+  `max` (trackers report overlapping swarms) and reports how many trackers replied. Every row shows
+  `SEEDS / LEECH` next to `PEERS`, and the details drawer and context menu repeat it. No tracker
+  answering is shown as `?`, never as a fake zero. Magnet `tr=` lists are now kept, so a magnet has
+  trackers to scrape.
+- **"Refresh Swarm Data"** in the context menu: scrapes immediately instead of waiting for the
+  10-minute refresh. A torrent that has just been added or resumed scrapes right away.
+- **A status line that explains the state** (`statusDetail`) on every row, in the context menu and in
+  the drawer: `Waiting for peers: 0 of 40 known, 3 dialling`, `Verifying the data already on disk —
+  42% hashed`, `Connected to 3 peer(s) but no data is flowing — they may not have the pieces`, `Seeded
+  swarm: 12 seed(s)`, and so on — all derived from real engine counters, never guessed.
+- **Stall watchdog.** Each torrent tracks the last verified byte count; when nothing arrives while it
+  is supposed to be downloading, the row shows an `IDLE 90s` badge and the status line says how long.
+- **Purge progress and a result report.** "Purge Monolith & Files" now keeps the row visible as
+  `Deleting — 4 512 of 20 000 files`, removes the payload with the engine's own walker, and reports
+  `filesRemoved` / `filesFailed` back to the window (toast). Failures name the first file that could
+  not be deleted instead of disappearing into the log.
+- `refresh_swarm` command and `purges` in `get_snapshot`.
+
+### Added — nothing looks frozen anymore
+- **Animated hidden-work bands.** States that do a lot of work while moving no bytes now say so in
+  the language of the theme, in the row, the context-menu header and the details drawer:
+  `Verifying payload` (dash-chiselled glyph, verified-piece counter, filling bar), `Erasing payload`
+  (falling shards, files-erased counter, red bar), `Waiting for an engine slot` (stepping-stone
+  dots), `Resolving metadata` (magnet glyph + crawling bar). States whose size is genuinely unknown
+  crawl; none of them ever shows a fake percentage.
+- **Radar sweep on the tracker scrape.** `TorrentItem.swarmRefreshing` is true exactly while a
+  BEP-48/BEP-15 scrape task is running, and the `SEEDS` cell swaps its sprout for a sweeping radar
+  glyph for that window — so "Refresh Swarm Data" is visibly doing something even before the
+  numbers land.
+- **Operation monitor.** Every command the window sends (add, start, pause, verify, purge, remove,
+  scrape, priority, file selection, backup, export, settings, turtle) is listed in a floating
+  transmitter readout with a live elapsed counter; after eight seconds it adds `STILL WORKING —
+  nothing is frozen`. A slow magnet resolution or a 20 000-file payload sweep is therefore never
+  silent again.
+- **Elapsed clock while a magnet resolves** in the add dialog (that wait is capped at 20 s, and it
+  used to show a spinner with no clock).
+- **A toast countdown.** Toasts carry a draining bar for as long as they live, so their
+  disappearance is expected rather than abrupt.
+- `get_torrent_files` command, and `fileCount` / `primaryPath` / `swarmRefreshing` on every row.
+
+### Changed — cheaper polling, calmer rendering
+- **The one-second poll no longer ships the whole library's file manifests.** A 20 000-file pack
+  was deep-cloned twice per tick (list + stats) and JSON-serialised into the IPC payload even
+  though the window was only showing one torrent's file list. Now only the torrent the details
+  drawer has open carries `files` / `fileProgress`; every other row carries its `fileCount` and, for
+  single-file torrents, its `primaryPath`, and anything else asks for the manifest explicitly with
+  `get_torrent_files` (switching rows, opening the Files tab, "Select files…").
+- **Rows only re-render when what they show changed.** `TorrentRow` is memoised over a value key
+  (`status`, counters, speeds, swarm numbers, stalled seconds, …), so a quiet row no longer tears
+  down and re-lays out its progress bar, badge and heatmap every second. The list's filter and sort
+  passes are memoised with it.
+- **`animate-fadeIn` now exists.** Five components asked for it and silently got nothing; modals,
+  the context menu and toasts now actually fade/slide in.
+- **Toast timers are tokenised.** An older toast's timeout could clear a *newer* toast that had just
+  replaced it; each timeout now only clears the toast it was created for.
+- `prefers-reduced-motion` disables every new animation (the glyphs and bars stay, they just stop
+  moving).
+
+### Fixed
+- **Purge/remove no longer hangs the app and now really deletes from disk.** It used to call
+  librqbit's `Session::delete(id, true)`, which runs `std::fs::remove_file` per payload file inline on
+  a tokio worker, gives up silently on the first Windows sharing violation, and can panic on a
+  missing metadata handle (a panic inside a Tauri command never resolves the IPC promise, which is
+  exactly a frozen window). Now the session release is bounded (`REMOVE_TIMEOUT`), and the files are
+  erased by `sparse::purge_payload` on a blocking thread with retries for temporary locks
+  (`ERROR_SHARING_VIOLATION` from Explorer's thumbnailer, players, antivirus), empty-directory pruning
+  and a per-file counter.
+- **Start / Pause / Verify / Purge answer the UI immediately.** `start_torrent` and `pause_torrent`
+  return the freshly built row, so the click updates the list instead of waiting for the next ~1 s
+  poll; every state-changing call is bounded by a timeout and reports a real error message when it
+  does not complete. Locked-up handlers used to leave the confirm dialog and the row untouched
+  forever.
+- **Removal/keep-files no longer shows a phantom path** and the confirm dialog closes before the
+  command runs.
+- **Downloads start sooner.** librqbit's `concurrent_init_limit` (3 hash checks at a time) left every
+  later torrent "Queued" behind the first few; it is now 8. The launch-time payload sweep is detached
+  from session creation, so the first window poll does not wait for a whole library of stat calls.
+- **No blocking `pause`/`unpause` inside the 1 s poll.** The launch-time re-arm loop and the
+  "seed when finished" policy are bounded too, so a wedged state machine can no longer stall the poll
+  that every row, counter and badge depends on.
+
+### Tests
+- 46 Rust tests (was 31 in v0.1.6): HTTP scrape parsing (seed/leech extraction, `failure reason`,
+  garbage bodies), announce→scrape URL mapping (including `announce.php`, query strings and
+  non-BEP-48 paths), UDP connect/scrape packet layout and response validation (BEP-15), hex
+  info-hash decoding, scrape merge semantics, `purge_payload` (owning files only, folder pruning,
+  foreign files kept, missing folder) and an end-to-end offline purge through the engine, the
+  `statusDetail` branches, and the lean/full snapshot split (`files` empty for unselected rows,
+  present for the drawer's torrent, served on demand by `get_torrent_files`).
+
 ## [v0.1.6] — 2026-10-30
 
 Resume release. Pointing a magnet or `.torrent` at a folder that already holds that torrent's
@@ -344,5 +447,6 @@ Rust) running a real `librqbit` session — no mocks, no fabricated telemetry.
 - Moving already-downloaded data to a new folder is not implemented yet (re-add with a new target
   folder to re-check in place).
 
-[Unreleased]: https://github.com/indoctrinatedrecluse/MakeMake/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/indoctrinatedrecluse/MakeMake/compare/v0.1.7...HEAD
+[v0.1.7]: https://github.com/indoctrinatedrecluse/MakeMake/compare/v0.1.6...v0.1.7
 [v0.1.6]: https://github.com/indoctrinatedrecluse/MakeMake/releases/tag/v0.1.6

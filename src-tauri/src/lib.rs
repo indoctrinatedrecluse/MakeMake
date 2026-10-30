@@ -1,6 +1,7 @@
 mod commands;
 mod engine;
 mod models;
+mod scrape;
 mod sparse;
 
 
@@ -91,11 +92,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_torrents,
             commands::get_snapshot,
+            commands::get_torrent_files,
             commands::retry_pending,
             commands::get_settings,
             commands::update_settings,
             commands::start_torrent,
             commands::pause_torrent,
+            commands::refresh_swarm,
             commands::force_recheck,
             commands::backup_torrent_now,
             commands::delete_torrent,

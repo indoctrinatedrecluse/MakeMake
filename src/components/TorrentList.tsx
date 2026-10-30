@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { TorrentItem } from '../types/torrent';
 import { TorrentRow } from './TorrentRow';
 import { Search, Inbox, ArrowUpDown } from 'lucide-react';
@@ -43,55 +43,61 @@ export const TorrentList: React.FC<TorrentListProps> = ({
   };
 
   // Filter torrents
-  const filteredTorrents = torrents.filter((t) => {
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      if (!t.name.toLowerCase().includes(q) && !t.infoHash.toLowerCase().includes(q)) {
-        return false;
+  const filteredTorrents = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    return torrents.filter((t) => {
+      if (query) {
+        if (!t.name.toLowerCase().includes(query) && !t.infoHash.toLowerCase().includes(query)) {
+          return false;
+        }
       }
-    }
 
-    switch (filter) {
-      case 'active':
-        return (
-          t.resolving === true || t.status === 'Downloading' || t.status === 'Seeding'
-        );
-      case 'completed':
-        return t.status === 'Seeding' || t.progress >= 100;
-      case 'paused':
-        return t.status === 'Paused';
-      case 'backedUp':
-        return t.backedUp;
-      default:
-        return true;
-    }
-  });
+      switch (filter) {
+        case 'active':
+          return (
+            t.resolving === true || t.status === 'Downloading' || t.status === 'Seeding'
+          );
+        case 'completed':
+          return t.status === 'Seeding' || t.progress >= 100;
+        case 'paused':
+          return t.status === 'Paused';
+        case 'backedUp':
+          return t.backedUp;
+        default:
+          return true;
+      }
+    });
+  }, [torrents, filter, searchQuery]);
 
   // Sort torrents
-  const sortedTorrents = [...filteredTorrents].sort((a, b) => {
-    let comp = 0;
-    switch (sortField) {
-      case 'name':
-        comp = a.name.localeCompare(b.name);
-        break;
-      case 'progress':
-        comp = a.progress - b.progress;
-        break;
-      case 'size':
-        comp = a.totalBytes - b.totalBytes;
-        break;
-      case 'dlSpeed':
-        comp = a.downloadSpeed - b.downloadSpeed;
-        break;
-      case 'ulSpeed':
-        comp = a.uploadSpeed - b.uploadSpeed;
-        break;
-      case 'eta':
-        comp = (a.etaSeconds ?? 999999) - (b.etaSeconds ?? 999999);
-        break;
-    }
-    return sortAsc ? comp : -comp;
-  });
+  const sortedTorrents = useMemo(() => {
+    const rows = [...filteredTorrents];
+    rows.sort((a, b) => {
+      let comp = 0;
+      switch (sortField) {
+        case 'name':
+          comp = a.name.localeCompare(b.name);
+          break;
+        case 'progress':
+          comp = a.progress - b.progress;
+          break;
+        case 'size':
+          comp = a.totalBytes - b.totalBytes;
+          break;
+        case 'dlSpeed':
+          comp = a.downloadSpeed - b.downloadSpeed;
+          break;
+        case 'ulSpeed':
+          comp = a.uploadSpeed - b.uploadSpeed;
+          break;
+        case 'eta':
+          comp = (a.etaSeconds ?? 999999) - (b.etaSeconds ?? 999999);
+          break;
+      }
+      return sortAsc ? comp : -comp;
+    });
+    return rows;
+  }, [filteredTorrents, sortField, sortAsc]);
 
   return (
     <main className="flex-1 flex flex-col h-full bg-obsidian-950 overflow-hidden">
@@ -161,7 +167,8 @@ export const TorrentList: React.FC<TorrentListProps> = ({
                     <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('dlSpeed')}>DL SPEED</th>
                     <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('ulSpeed')}>UL SPEED</th>
                     <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('eta')}>ETA</th>
-                    <th className="px-3 py-2">PEERS</th>
+                    <th className="px-3 py-2" title="Seeds / leechers in the swarm (tracker scrape)">SEEDS/LEECH</th>
+                    <th className="px-3 py-2" title="Peers connected / known to this client">PEERS</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 bg-obsidian-950/80">

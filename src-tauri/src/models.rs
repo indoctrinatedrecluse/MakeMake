@@ -74,8 +74,38 @@ pub struct TorrentItem {
     pub status: String,
     pub peers_connected: u32,
     pub peers_total: u32,
-    pub seeds_connected: u32,
+    /// Peers in librqbit's `connecting` state (handshake in flight).
+    #[serde(default)]
+    pub peers_connecting: u32,
+    /// Peers discovered but not dialled yet.
+    #[serde(default)]
+    pub peers_queued: u32,
+    /// Peers the client gave up on (timeouts, refusals, bans).
+    #[serde(default)]
+    pub peers_dead: u32,
+    /// Seeds in the swarm, as scraped from the torrent's trackers.
+    ///
+    /// librqbit exposes no seed/leech data at all, so MakeMake scrapes the trackers itself
+    /// (see `src/scrape.rs`). `0` with `swarm_sources == 0` means "no tracker answered" —
+    /// the UI shows that as unknown rather than as an empty swarm.
     pub seeds_total: u32,
+    /// Leechers in the swarm, from the same tracker scrape.
+    pub leechers_total: u32,
+    /// Trackers that answered the last scrape.
+    #[serde(default)]
+    pub swarm_sources: u32,
+    /// Unix ms of the last scrape attempt (`0` = never attempted).
+    #[serde(default)]
+    pub swarm_checked_at: i64,
+    /// One human sentence explaining exactly what this swarm is doing right now
+    /// ("Waiting for peers: 0 connected, 214 known", "Verifying pieces: 42%", …).
+    #[serde(default)]
+    pub status_detail: String,
+    /// Seconds spent running without a single verified new byte (`0` = progress is flowing).
+    ///
+    /// This is the answer to "it says Downloading, so why is nothing happening?".
+    #[serde(default)]
+    pub stalled_seconds: i64,
     pub eta_seconds: Option<i64>,
     pub download_dir: String,
     pub files: Vec<TorrentFileItem>,
@@ -97,6 +127,47 @@ pub struct TorrentItem {
     /// yet). Such an item has no librqbit handle behind it.
     #[serde(default)]
     pub resolving: bool,
+    /// True while this entry's payload is being erased from disk. The row stays visible (with
+    /// a progress counter) until the wipe finishes, so a purge is never a silent no-op.
+    #[serde(default)]
+    pub deleting: bool,
+    /// Number of payload files.
+    ///
+    /// The file list itself (`files`) is only shipped for the torrent the details drawer has
+    /// open: a 20 000-file pack used to be deep-cloned and serialised into every single poll,
+    /// which cost megabytes per second of IPC traffic for a list the window was not showing.
+    #[serde(default)]
+    pub file_count: usize,
+    /// Absolute path of the single payload file for single-file torrents (`None` for multi-file
+    /// ones).
+    ///
+    /// Lets the context menu offer "open file" without needing the whole file list.
+    #[serde(default)]
+    pub primary_path: Option<String>,
+    /// A tracker scrape for this torrent is running right now (drives the UI's radar sweep).
+    #[serde(default)]
+    pub swarm_refreshing: bool,
+}
+
+/// One in-flight or just-finished payload wipe ("Purge Monolith & Files").
+///
+/// The deletion itself runs on a blocking thread that reports how far it got, because a
+/// torrent with 20 000 files takes a while and silently freezing the window (what
+/// `librqbit`'s `delete(delete_files = true)` did) is not acceptable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PurgeReport {
+    pub info_hash: String,
+    pub name: String,
+    pub dir: String,
+    pub files_total: usize,
+    pub files_done: usize,
+    pub files_removed: usize,
+    pub files_failed: usize,
+    /// The wipe finished (successfully or not); the UI reports it once and lets it expire.
+    pub done: bool,
+    /// Set when the wipe could not even start (e.g. the folder vanished).
+    pub error: Option<String>,
 }
 
 /// One UI poll: the whole queue plus the global counters, in a single round trip.
@@ -105,6 +176,9 @@ pub struct TorrentItem {
 pub struct TorrentSnapshot {
     pub torrents: Vec<TorrentItem>,
     pub stats: SystemStats,
+    /// Payload wipes currently running or recently finished.
+    #[serde(default)]
+    pub purges: Vec<PurgeReport>,
 }
 
 /// How much of a torrent's payload actually exists on disk.
@@ -232,4 +306,18 @@ pub struct SystemStats {
     /// `.torrent` archive, so the vault can never be left incomplete.
     #[serde(default)]
     pub crashed_last_run: bool,
+}
+
+/// Payload file manifest of one torrent, fetched on demand.
+///
+/// The window polls [`TorrentItem`]s once a second, and the file list of a large pack is by
+/// far the heaviest part of that payload. It is therefore only included for the torrent the
+/// details drawer has open; anything else asks for it explicitly with `get_torrent_files`
+/// (switching the selection, opening the Files tab, "Select files…").
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentFilesPayload {
+    pub files: Vec<TorrentFileItem>,
+    /// Per-file downloaded bytes, in `files` order (straight from librqbit).
+    pub file_progress: Vec<u64>,
 }

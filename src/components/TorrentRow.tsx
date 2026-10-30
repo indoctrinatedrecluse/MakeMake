@@ -8,9 +8,14 @@ import {
   ArrowUp,
   HardDrive,
   Users,
+  Sprout,
+  TriangleAlert,
+  Loader2,
 } from 'lucide-react';
 import { TorrentItem } from '../types/torrent';
 import { CyberProgressBar } from './gizmos/CyberProgressBar';
+import { WorkBand, deriveHiddenWork } from './gizmos/WorkBand';
+import { WorkGlyph } from './gizmos/WorkGlyph';
 import { cyberAudio } from '../utils/cyberAudio';
 
 interface TorrentRowProps {
@@ -23,7 +28,44 @@ interface TorrentRowProps {
   onPause: (id: string) => void;
 }
 
-export const TorrentRow: React.FC<TorrentRowProps> = ({
+/**
+ * Everything a row actually renders, flattened into one comparable string.
+ *
+ * The window polls once a second and every poll produces brand-new objects, so a plain
+ * `React.memo` would never hit. Comparing this key instead keeps a quiet row from re-rendering
+ * (and re-laying out its progress bar and badge) twenty times a minute.
+ */
+export const torrentRenderKey = (t: TorrentItem): string =>
+  [
+    t.name,
+    t.status,
+    t.statusDetail,
+    t.downloadedBytes,
+    t.totalBytes,
+    t.uploadedBytes,
+    t.downloadSpeed,
+    t.uploadSpeed,
+    t.peersConnected,
+    t.peersTotal,
+    t.peersConnecting,
+    t.seedsTotal,
+    t.leechersTotal,
+    t.swarmSources,
+    t.swarmRefreshing ? 1 : 0,
+    t.stalledSeconds,
+    t.etaSeconds ?? -1,
+    t.piecesCompleted,
+    t.pieceCount,
+    t.resolving ? 1 : 0,
+    t.deleting ? 1 : 0,
+    t.backedUp ? 1 : 0,
+    t.backupPath ?? '',
+    t.error ?? '',
+    t.downloadDir,
+    t.progress.toFixed(2),
+  ].join('\u0001');
+
+const TorrentRowBase: React.FC<TorrentRowProps> = ({
   torrent,
   isSelected,
   viewMode = 'cards',
@@ -69,6 +111,8 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
         return 'text-cyber-gold bg-cyber-gold/15 border-cyber-gold/40 animate-pulse';
       case 'Resolving':
         return 'text-cyber-gold bg-cyber-gold/15 border-cyber-gold/40 animate-pulse';
+      case 'Deleting':
+        return 'text-cyber-red bg-cyber-red/15 border-cyber-red/40 animate-pulse';
       case 'Error':
         return 'text-cyber-red bg-cyber-red/15 border-cyber-red/40';
       default:
@@ -79,7 +123,18 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
   const isPaused = torrent.status === 'Paused';
   // A queued magnet has no librqbit handle yet: the button retries metadata resolution.
   const isResolving = torrent.resolving === true;
+  const isDeleting = torrent.status === 'Deleting';
   const canStart = isPaused || isResolving;
+
+  // Swarm sizes come from a tracker scrape: `swarmSources === 0` means no tracker answered,
+  // which must read as "unknown" rather than "no seeds in the world".
+  const swarmKnown = (torrent.swarmSources ?? 0) > 0;
+  const seedsLabel = swarmKnown ? `${torrent.seedsTotal}` : '?';
+  const leechLabel = swarmKnown ? `${torrent.leechersTotal}` : '?';
+  const stalled = (torrent.stalledSeconds ?? 0) >= 45 && torrent.status === 'Downloading';
+  // Hidden work: verification, purge, magnet resolution, queueing. `null` when the row is
+  // simply transferring (or idle), because then the numbers themselves are the feedback.
+  const work = deriveHiddenWork(torrent);
 
   // Compact High-Density Table View Mode
   if (viewMode === 'table') {
@@ -101,9 +156,12 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
           <span className="font-bold truncate max-w-[280px]">{torrent.name}</span>
         </td>
         <td className="px-3 py-2">
-          <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase border ${getStatusColor()}`}>
-            {torrent.status}
-          </span>
+          <div className="flex items-center space-x-1.5">
+            {work && <WorkGlyph kind={work.kind} size={11} title={work.label} />}
+            <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase border ${getStatusColor()}`}>
+              {torrent.status}
+            </span>
+          </div>
         </td>
         <td className="px-3 py-2 w-44">
           <div className="flex items-center space-x-2">
@@ -122,7 +180,22 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
         <td className="px-3 py-2 text-cyber-cyan font-bold">{formatSpeed(torrent.downloadSpeed)}</td>
         <td className="px-3 py-2 text-cyber-red font-bold">{formatSpeed(torrent.uploadSpeed)}</td>
         <td className="px-3 py-2 text-slate-400">{formatEta(torrent.etaSeconds)}</td>
-        <td className="px-3 py-2 text-slate-400">{torrent.peersConnected}/{torrent.peersTotal}</td>
+        <td className="px-3 py-2 text-slate-400">
+          {torrent.swarmRefreshing && (
+            <WorkGlyph
+              kind="scrape"
+              size={10}
+              className="inline-block mr-1 align-[-1px]"
+              title="Scraping the trackers for fresh seed/leech numbers"
+            />
+          )}
+          <span className="text-cyber-green font-bold">{seedsLabel}</span>
+          <span className="text-slate-600"> / </span>
+          <span className="text-cyber-gold">{leechLabel}</span>
+        </td>
+        <td className="px-3 py-2 text-slate-400">
+          {torrent.peersConnected}/{torrent.peersTotal}
+        </td>
       </tr>
     );
   }
@@ -181,6 +254,7 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
           <button
             onClick={(e) => {
               e.stopPropagation();
+              if (isDeleting) return;
               cyberAudio.playClick();
               if (canStart) {
                 onStart(torrent.id);
@@ -188,16 +262,25 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
                 onPause(torrent.id);
               }
             }}
-            className="p-1.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition-colors border border-slate-700"
+            disabled={isDeleting}
+            className="p-1.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition-colors border border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
             title={
-              isResolving
-                ? 'Retry metadata resolution'
-                : isPaused
-                  ? 'Awaken Monolith (Start)'
-                  : 'Dormant State (Pause)'
+              isDeleting
+                ? 'Payload is being erased from disk'
+                : isResolving
+                  ? 'Retry metadata resolution'
+                  : isPaused
+                    ? 'Awaken Monolith (Start)'
+                    : 'Dormant State (Pause)'
             }
           >
-            {canStart ? <Play className="w-3.5 h-3.5 text-cyber-cyan" /> : <Pause className="w-3.5 h-3.5 text-cyber-red" />}
+            {isDeleting ? (
+              <Loader2 className="w-3.5 h-3.5 text-cyber-red animate-spin" />
+            ) : canStart ? (
+              <Play className="w-3.5 h-3.5 text-cyber-cyan" />
+            ) : (
+              <Pause className="w-3.5 h-3.5 text-cyber-red" />
+            )}
           </button>
         </div>
       </div>
@@ -229,9 +312,23 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
         />
       </div>
 
-      {/* Lower Bar: Swarm Telemetry Stats (Speeds, Peers, Seeds) */}
+      {/* Hidden work: hashing, erasing, resolving, queueing. Only mounted while it runs, so a
+          row that is quietly transferring never carries extra animation. */}
+      {work && (
+        <WorkBand
+          kind={work.kind}
+          label={work.label}
+          detail={work.detail}
+          progress={work.progress}
+          counter={work.counter}
+          tone={work.tone}
+          className="mb-2"
+        />
+      )}
+
+      {/* Swarm Telemetry: speeds, seeds/leech (tracker scrape) and peers (librqbit) */}
       <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 pt-1 border-t border-slate-800/60">
-        <div className="flex items-center space-x-4">
+        <div className="flex items-center space-x-3 flex-wrap gap-y-1">
           <div className="flex items-center space-x-1">
             <ArrowDown className="w-3 h-3 text-cyber-cyan" />
             <span className="text-cyber-cyan font-bold font-mono">
@@ -246,12 +343,55 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
             </span>
           </div>
 
-          <div className="flex items-center space-x-1 text-slate-400">
-            <Users className="w-3 h-3 text-cyber-gold" />
-            <span>
-              PEERS: <strong className="text-slate-200">{torrent.peersConnected}</strong>/{torrent.peersTotal}
+          {/* Seeds / leechers in the swarm (trackers), not just the ones we talk to. */}
+          <div
+            className="flex items-center space-x-1"
+            title={
+              swarmKnown
+                ? `Tracker scrape: ${torrent.seedsTotal} seed(s), ${torrent.leechersTotal} leecher(s) in the swarm (${torrent.swarmSources} tracker(s) answered)`
+                : 'No tracker answered the last scrape — swarm size unknown (DHT-only or trackers down)'
+            }
+          >
+            {torrent.swarmRefreshing ? (
+              <WorkGlyph kind="scrape" size={11} title="Scraping the trackers right now" />
+            ) : (
+              <Sprout className="w-3 h-3 text-cyber-green" />
+            )}
+            <span className="text-slate-400">
+              SEEDS:{' '}
+              <strong className={swarmKnown ? 'text-cyber-green' : 'text-slate-500'}>
+                {seedsLabel}
+              </strong>
             </span>
           </div>
+
+          <div className="flex items-center space-x-1" title="Leechers reported by the trackers">
+            <span className="text-slate-500">LEECH:</span>
+            <strong className={swarmKnown ? 'text-cyber-gold' : 'text-slate-500'}>
+              {leechLabel}
+            </strong>
+          </div>
+
+          <div
+            className="flex items-center space-x-1 text-slate-400"
+            title={`Peers this client is connected to / known: ${torrent.peersConnected} live, ${torrent.peersConnecting} connecting, ${torrent.peersQueued} queued, ${torrent.peersDead} dead`}
+          >
+            <Users className="w-3 h-3 text-cyber-gold" />
+            <span>
+              PEERS: <strong className="text-slate-200">{torrent.peersConnected}</strong>/
+              {torrent.peersTotal}
+            </span>
+          </div>
+
+          {stalled && (
+            <span
+              className="flex items-center space-x-1 px-1.5 py-0.5 rounded bg-cyber-red/15 border border-cyber-red/40 text-cyber-red text-[10px] anim-ember"
+              title="No new verified byte arrived for a while — see the line below for why"
+            >
+              <TriangleAlert className="w-3 h-3" />
+              <span>IDLE {torrent.stalledSeconds}s</span>
+            </span>
+          )}
         </div>
 
         <div className="hidden md:flex items-center space-x-1 text-slate-500 truncate max-w-xs text-[10px]">
@@ -259,6 +399,38 @@ export const TorrentRow: React.FC<TorrentRowProps> = ({
           <span className="truncate">{torrent.downloadDir}</span>
         </div>
       </div>
+
+      {/* What is actually happening right now (the engine's own words). */}
+      {torrent.statusDetail && (
+        <div
+          className={`mt-1 text-[10px] font-mono truncate ${
+            torrent.status === 'Error'
+              ? 'text-cyber-red'
+              : stalled
+                ? 'text-cyber-gold'
+                : 'text-slate-500'
+          }`}
+          title={torrent.statusDetail}
+        >
+          {torrent.statusDetail}
+        </div>
+      )}
     </div>
   );
 };
+
+/**
+ * A row only re-renders when the numbers it shows actually changed.
+ *
+ * Every poll hands the list a fresh `TorrentItem`, so the comparison is done on the rendered
+ * values ([`torrentRenderKey`]) rather than on object identity. Callbacks are deliberately
+ * ignored: they are re-created by the app shell on every render, and none of them closes over
+ * row state.
+ */
+export const TorrentRow = React.memo(
+  TorrentRowBase,
+  (prev, next) =>
+    prev.isSelected === next.isSelected &&
+    prev.viewMode === next.viewMode &&
+    torrentRenderKey(prev.torrent) === torrentRenderKey(next.torrent),
+);

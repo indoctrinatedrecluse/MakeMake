@@ -4,7 +4,7 @@ use std::process::Command;
 use crate::engine::TorrentEngine;
 use crate::models::{
     BackupResult, ClientSettings, ExistingPayload, PeerDetail, SystemStats, TorrentDiskUsage,
-    TorrentItem, TorrentMetadataPreview, TorrentSnapshot,
+    TorrentFilesPayload, TorrentItem, TorrentMetadataPreview, TorrentSnapshot,
 };
 
 #[tauri::command]
@@ -13,9 +13,25 @@ pub async fn get_torrents(engine: State<'_, TorrentEngine>) -> Result<Vec<Torren
 }
 
 /// Torrent queue + global counters in one call (what the window polls every second).
+///
+/// `selected` is the torrent whose payload manifest the details drawer is showing; only that
+/// item carries its file list, so a 20 000-file pack no longer travels through IPC on every
+/// tick. Everything else uses [`get_torrent_files`].
 #[tauri::command]
-pub async fn get_snapshot(engine: State<'_, TorrentEngine>) -> Result<TorrentSnapshot, String> {
-    engine.get_snapshot().await
+pub async fn get_snapshot(
+    selected: Option<String>,
+    engine: State<'_, TorrentEngine>,
+) -> Result<TorrentSnapshot, String> {
+    engine.get_snapshot(selected).await
+}
+
+/// Full payload manifest of one torrent (paths + per-file progress), fetched on demand.
+#[tauri::command]
+pub async fn get_torrent_files(
+    id: String,
+    engine: State<'_, TorrentEngine>,
+) -> Result<TorrentFilesPayload, String> {
+    engine.get_torrent_files(&id).await
 }
 
 /// Re-arm a queued magnet whose metadata resolution failed.
@@ -38,13 +54,26 @@ pub async fn update_settings(
 }
 
 #[tauri::command]
-pub async fn start_torrent(id: String, engine: State<'_, TorrentEngine>) -> Result<(), String> {
+pub async fn start_torrent(
+    id: String,
+    engine: State<'_, TorrentEngine>,
+) -> Result<TorrentItem, String> {
     engine.start_torrent(&id).await
 }
 
 #[tauri::command]
-pub async fn pause_torrent(id: String, engine: State<'_, TorrentEngine>) -> Result<(), String> {
+pub async fn pause_torrent(
+    id: String,
+    engine: State<'_, TorrentEngine>,
+) -> Result<TorrentItem, String> {
     engine.pause_torrent(&id).await
+}
+
+/// Ask the trackers for the swarm size right now (the context menu's "Refresh swarm data").
+#[tauri::command]
+pub async fn refresh_swarm(id: String, engine: State<'_, TorrentEngine>) -> Result<(), String> {
+    engine.refresh_swarm(&id).await;
+    Ok(())
 }
 
 #[tauri::command]

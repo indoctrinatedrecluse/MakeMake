@@ -26,6 +26,8 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use fs4::FileExt as _;
 
@@ -354,6 +356,212 @@ fn is_safe_child(root: &Path, candidate: &Path) -> bool {
         }
     }
     depth > 0
+}
+
+/// One finished (or running) payload wipe.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PurgeSummary {
+    /// Files that are gone (or were already gone).
+    pub removed: usize,
+    /// Files that could not be deleted (still open in another program, read-only, …).
+    pub failed: usize,
+    /// The per-torrent folder itself was removed because nothing is left in it.
+    pub dir_removed: bool,
+    /// First deletion error, for the UI ("file is open in another program").
+    pub first_error: Option<String>,
+}
+
+/// How often a locked file is retried before it is reported as failed.
+///
+/// Windows reports `ERROR_SHARING_VIOLATION` while *any* other process holds the file open —
+/// a media player, Explorer's thumbnailer, an antivirus scanner. Those handles are usually
+/// released within a few hundred milliseconds, so a short backoff turns most of them into a
+/// success instead of the silent `warn!`-and-leave-it-behaviour librqbit has.
+const PURGE_ATTEMPTS: u32 = 5;
+
+/// Delete a torrent's payload files (and then its now-empty folders) without ever blocking
+/// the async runtime, and report what actually happened.
+///
+/// This is the "Purge Monolith & Files" implementation. It deliberately does **not** go
+/// through `Session::delete(id, delete_files = true)`: librqbit runs that deletion inline on
+/// a runtime worker (freezing the window for a big pack), gives up on the first sharing
+/// violation, and reports nothing back to the caller.
+///
+/// Only the paths the torrent itself declares are touched — never the whole folder, never a
+/// wildcard — and only regular files are removed (see [`is_safe_child`]).
+///
+/// `progress` is incremented once per payload file processed, so a background caller can show
+/// "deleting 4 512 / 20 000 files".
+pub fn purge_payload(
+    output_dir: &Path,
+    files: &[(PathBuf, u64)],
+    progress: &AtomicUsize,
+) -> io::Result<PurgeSummary> {
+    let mut summary = PurgeSummary::default();
+
+    if !output_dir.is_dir() {
+        // Nothing was ever written (or someone else already erased it).
+        return Ok(summary);
+    }
+
+    let mut touched_dirs: Vec<PathBuf> = Vec::new();
+
+    for (relative, _length) in files {
+        let target = output_dir.join(relative);
+        progress.fetch_add(1, Ordering::Relaxed);
+
+        if !is_safe_child(output_dir, &target) {
+            continue;
+        }
+        match fs::symlink_metadata(&target) {
+            Ok(meta) if meta.file_type().is_file() && !meta.file_type().is_symlink() => {}
+            // Already gone, or something that is not ours to delete.
+            _ => continue,
+        }
+
+        match remove_with_retries(&target) {
+            Ok(()) => {
+                summary.removed += 1;
+                if let Some(parent) = target.parent() {
+                    touched_dirs.push(parent.to_path_buf());
+                }
+            }
+            Err(err) => {
+                summary.failed += 1;
+                if summary.first_error.is_none() {
+                    summary.first_error = Some(format!("{}: {err}", target.display()));
+                }
+            }
+        }
+    }
+
+    // Deepest first, so `pack/disc1` can be pruned once its files are gone.
+    touched_dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    touched_dirs.dedup();
+    for dir in touched_dirs {
+        prune_empty_dirs(output_dir, dir);
+    }
+
+    // The per-torrent folder itself: only if it is completely empty, and only after a few
+    // retries (a Windows file that was just deleted can still be "delete pending" for a
+    // moment, which makes `remove_dir` fail with ERROR_DIR_NOT_EMPTY).
+    if summary.failed == 0 {
+        for attempt in 0..PURGE_ATTEMPTS {
+            match fs::remove_dir(output_dir) {
+                Ok(()) => {
+                    summary.dir_removed = true;
+                    break;
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    summary.dir_removed = true;
+                    break;
+                }
+                Err(_) => {
+                    // Not empty (foreign files) or still settling: give it a moment.
+                    std::thread::sleep(Duration::from_millis(40 * u64::from(attempt + 1)));
+                }
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Remove one file, retrying while another process still holds a handle to it.
+fn remove_with_retries(target: &Path) -> io::Result<()> {
+    let mut delay = Duration::from_millis(25);
+    let mut last = None;
+
+    for attempt in 0..PURGE_ATTEMPTS {
+        match fs::remove_file(target) {
+            Ok(()) => return Ok(()),
+            // Somebody else removed it first: that is a success for us.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                last = Some(err);
+                if attempt + 1 < PURGE_ATTEMPTS {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+            }
+        }
+    }
+
+    Err(last.unwrap_or_else(|| io::Error::other("could not delete the file")))
+}
+
+/// The purge walker gets its own test module: it is the one place that deletes user data.
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+
+    /// The purge path must erase the torrent's own files, prune its folders, drop the
+    /// per-torrent folder when nothing is left — and never touch a foreign file.
+    #[test]
+    fn purge_removes_the_payload_and_the_empty_torrent_folder() {
+        let root = std::env::temp_dir().join(format!("makemake-purge-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let output = root.join("monolith");
+        fs::create_dir_all(output.join("disc1")).unwrap();
+        fs::create_dir_all(output.join("disc2")).unwrap();
+
+        fs::write(output.join("disc1/a.bin"), vec![1u8; 64]).unwrap();
+        fs::write(output.join("disc2/b.bin"), vec![2u8; 64]).unwrap();
+
+        let files = vec![
+            (PathBuf::from("disc1/a.bin"), 64u64),
+            (PathBuf::from("disc2/b.bin"), 64u64),
+            (PathBuf::from("never-written.bin"), 64u64),
+        ];
+
+        let progress = AtomicUsize::new(0);
+        let summary = purge_payload(&output, &files, &progress).unwrap();
+
+        assert_eq!(summary.removed, 2);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.first_error, None);
+        assert!(summary.dir_removed, "an empty torrent folder must go too");
+        assert_eq!(progress.load(Ordering::Relaxed), 3);
+        assert!(!output.exists());
+        assert!(root.is_dir(), "the download folder itself stays");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A folder that still holds somebody else's files keeps its torrent folder, and the walk
+    /// reports what it actually erased instead of pretending the purge was complete.
+    #[test]
+    fn purge_keeps_the_folder_when_foreign_files_remain() {
+        let root = std::env::temp_dir().join(format!("makemake-purge-keep-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let output = root.join("monolith");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("ours.bin"), vec![3u8; 32]).unwrap();
+        fs::write(output.join("theirs.txt"), b"keep me").unwrap();
+
+        let files = vec![(PathBuf::from("ours.bin"), 32u64)];
+        let progress = AtomicUsize::new(0);
+        let summary = purge_payload(&output, &files, &progress).unwrap();
+
+        assert_eq!(summary.removed, 1);
+        assert!(!summary.dir_removed);
+        assert!(output.join("theirs.txt").is_file());
+        assert!(!output.join("ours.bin").exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn purge_is_harmless_when_the_payload_never_existed() {
+        let root = std::env::temp_dir().join(format!("makemake-purge-none-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+
+        let files = vec![(PathBuf::from("a.bin"), 1u64)];
+        let progress = AtomicUsize::new(0);
+        let summary = purge_payload(&root, &files, &progress).unwrap();
+
+        assert_eq!(summary, PurgeSummary::default());
+    }
 }
 
 #[cfg(test)]

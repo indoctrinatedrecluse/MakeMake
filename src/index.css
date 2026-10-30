@@ -106,3 +106,167 @@
     transform: translateX(100%);
   }
 }
+
+/* =====================================================================
+   Hidden-work animations
+   ---------------------------------------------------------------------
+   Every animation below exists for one reason: the engine does a lot of
+   work that produces no visible bytes — hash-checking a payload, erasing
+   files from disk, resolving a magnet, waiting for an init slot, scraping
+   a tracker. A row that shows nothing while that happens reads as "the
+   app froze". These glyphs and bands always look alive, and they are only
+   mounted while the work is actually running.
+   ===================================================================== */
+
+@keyframes runeSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Dash-marching stroke: reads as a chisel carving around the moai glyph. */
+@keyframes runeDash {
+  to {
+    stroke-dashoffset: -40;
+  }
+}
+
+@keyframes radarSweep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Crawling hazard stripes: used where a percentage is genuinely unknown. */
+@keyframes strandCrawl {
+  to {
+    background-position: 28px 0;
+  }
+}
+
+/* Slow ember breathing for "stalled / idle" states (never a blink, so it can be
+   left on screen indefinitely without being distracting). */
+@keyframes emberBreath {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+/* Shards falling out of the purge glyph. */
+@keyframes shardFall {
+  0% {
+    transform: translateY(-2px);
+    opacity: 0;
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(7px);
+    opacity: 0;
+  }
+}
+
+/* Dots that walk a queue. */
+@keyframes queueWalk {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
+/* Ripple emitted by the "transmitting" glyph while an IPC command is in flight. */
+@keyframes transmitRing {
+  0% {
+    transform: scale(0.5);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+/* Toast countdown: the bar drains over the toast's own lifetime. */
+@keyframes toastDrain {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+.anim-rune-spin {
+  animation: runeSpin 2.6s linear infinite;
+  transform-origin: center;
+}
+
+.anim-rune-dash {
+  animation: runeDash 1.4s linear infinite;
+}
+
+.anim-radar {
+  animation: radarSweep 1.9s linear infinite;
+  transform-origin: center;
+}
+
+.anim-strands {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    currentColor 0,
+    currentColor 6px,
+    transparent 6px,
+    transparent 14px
+  );
+  background-size: 28px 100%;
+  animation: strandCrawl 0.9s linear infinite;
+}
+
+.anim-ember {
+  animation: emberBreath 2.8s ease-in-out infinite;
+}
+
+.anim-shard {
+  animation: shardFall 1.6s ease-in infinite;
+}
+
+.anim-queue-dot {
+  animation: queueWalk 1.5s ease-in-out infinite;
+}
+
+.anim-transmit-ring {
+  animation: transmitRing 1.6s ease-out infinite;
+  transform-origin: center;
+}
+
+.anim-toast-drain {
+  transform-origin: left center;
+  animation: toastDrain linear forwards;
+}
+
+/* Motion-sensitive users get the same information without the movement: the
+   glyphs and bars stay, they simply stop moving. */
+@media (prefers-reduced-motion: reduce) {
+  .anim-rune-spin,
+  .anim-rune-dash,
+  .anim-radar,
+  .anim-strands,
+  .anim-ember,
+  .anim-shard,
+  .anim-queue-dot,
+  .anim-transmit-ring,
+  .anim-toast-drain,
+  .animate-pulse,
+  .animate-spin,
+  .animate-bounce {
+    animation: none !important;
+  }
+}

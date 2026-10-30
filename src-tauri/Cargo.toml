@@ -1,6 +1,6 @@
 [package]
 name = "makemake"
-version = "0.1.6"
+version = "0.1.7"
 description = "MakeMake // Rapa Nui Cyberpunk BitTorrent Engine"
 authors = ["Abhishek Mitra (indoctrinatedrecluse)"]
 license = "Apache-2.0"
@@ -37,6 +37,12 @@ base64 = "0.22"
 # Torrent names become directory/file names on disk: this applies Node's
 # `sanitize-filename` rules (illegal characters, Windows device names, trailing dots).
 sanitize-filename = "0.6"
+
+# Tracker scrape (`/scrape` over HTTP(S), BEP-15 over UDP) for the seed/leech numbers
+# librqbit does not expose. `reqwest` is already in the dependency graph *through*
+# librqbit, so declaring it here adds no compilation work; the feature list must match
+# librqbit's `default-tls` so Cargo does not build a second TLS stack.
+reqwest = { version = "0.13", default-features = false, features = ["default-tls"] }
 
 # Filesystem numbers: free/total space of the download volume (`statvfs` /
 # `GetDiskFreeSpaceExW`) and the *allocated* size of a file, which is how a sparse

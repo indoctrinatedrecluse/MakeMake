@@ -18,8 +18,10 @@ import {
   Check,
   Link2,
   ClipboardList,
+  RefreshCw,
 } from 'lucide-react';
 import { TorrentItem } from '../types/torrent';
+import { WorkBand, deriveHiddenWork } from './gizmos/WorkBand';
 
 export type TorrentPriority = TorrentItem['priority'];
 
@@ -36,6 +38,7 @@ interface ContextMenuProps {
   onOpenPath: (path: string) => void;
   onCopy: (text: string, label: string) => void;
   onSetPriority: (id: string, priority: TorrentPriority) => void;
+  onRefreshSwarm: (id: string) => void;
   onBackupNow: (id: string) => void;
   onExportTorrent: (torrent: TorrentItem) => void;
   onEditFiles: (torrent: TorrentItem) => void;
@@ -47,7 +50,7 @@ const MENU_WIDTH = 264;
 const VIEWPORT_MARGIN = 8;
 
 const itemClass =
-  'w-full px-3 py-1.5 text-left hover:bg-cyber-cyan/20 hover:text-cyber-cyan focus:bg-cyber-cyan/20 focus:text-cyber-cyan focus:outline-none flex items-center space-x-2.5 transition-colors';
+  'w-full px-3 py-1.5 text-left hover:bg-cyber-cyan/20 hover:text-cyber-cyan focus:bg-cyber-cyan/20 focus:text-cyber-cyan focus:outline-none flex items-center space-x-2.5 transition-colors disabled:opacity-40 disabled:pointer-events-none';
 
 const priorities: TorrentPriority[] = ['High', 'Normal', 'Low'];
 
@@ -71,6 +74,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   onOpenPath,
   onCopy,
   onSetPriority,
+  onRefreshSwarm,
   onBackupNow,
   onExportTorrent,
   onEditFiles,
@@ -169,13 +173,23 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
   const magnet = torrent.magnetUri || `magnet:?xt=urn:btih:${torrent.infoHash}`;
   const isPaused = torrent.status === 'Paused';
-  const singleFile = torrent.files.length === 1 ? torrent.files[0] : null;
+  const isDeleting = torrent.status === 'Deleting';
+  const swarmKnown = (torrent.swarmSources ?? 0) > 0;
+  // The manifest is only shipped for the torrent the drawer is showing, so single-file
+  // detection uses the count the engine reports for every row.
+  const fileCount = torrent.fileCount ?? torrent.files?.length ?? 0;
+  const singleFile = fileCount === 1 ? torrent.files?.[0] ?? null : null;
   // `downloadDir` already *is* the per-torrent folder, so a multi-file payload lives directly
   // inside it (the old `${dir}/${name}` doubled the name).
-  const dataPath = singleFile
-    ? `${torrent.downloadDir}/${singleFile.path || singleFile.name}`
-    : torrent.downloadDir;
+  const dataPath = torrent.primaryPath
+    ? torrent.primaryPath
+    : singleFile
+      ? `${torrent.downloadDir}/${singleFile.path || singleFile.name}`
+      : torrent.downloadDir;
   const trackers = torrent.trackers ?? [];
+  // Hashed/purged/queued states: say so here too, so the menu never looks static while the
+  // row behind it is working.
+  const work = deriveHiddenWork(torrent);
 
   /** Shared shape for a row that opens a submenu. */
   const submenuRowClass = `${itemClass} justify-between`;
@@ -209,10 +223,59 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         <span className="truncate">{torrent.status}</span>
         <span>{torrent.priority} priority</span>
       </div>
+      <div className="px-3 py-1 text-[10px] text-slate-500 flex items-center justify-between border-b border-slate-800/70 gap-2">
+        <span className="truncate" title={torrent.statusDetail}>
+          {torrent.statusDetail || torrent.status}
+        </span>
+      </div>
+      {work && (
+        <div className="px-2 py-1.5 border-b border-slate-800/70">
+          <WorkBand
+            kind={work.kind}
+            label={work.label}
+            progress={work.progress}
+            counter={work.counter}
+            tone={work.tone}
+          />
+        </div>
+      )}
+      <div className="px-3 py-1 text-[10px] text-slate-400 flex items-center space-x-2 border-b border-slate-800/70">
+        <span>
+          SEEDS:{' '}
+          <strong className={swarmKnown ? 'text-cyber-green' : 'text-slate-500'}>
+            {swarmKnown ? torrent.seedsTotal : '?'}
+          </strong>
+        </span>
+        <span>
+          LEECH:{' '}
+          <strong className={swarmKnown ? 'text-cyber-gold' : 'text-slate-500'}>
+            {swarmKnown ? torrent.leechersTotal : '?'}
+          </strong>
+        </span>
+        <span title={`${torrent.peersConnecting} connecting, ${torrent.peersQueued} queued, ${torrent.peersDead} dead`}>
+          PEERS: <strong className="text-slate-200">{torrent.peersConnected}</strong>/{torrent.peersTotal}
+        </span>
+      </div>
 
       <SectionLabel>Transfer</SectionLabel>
 
-      {isPaused ? (
+      <button
+        className={itemClass}
+        onClick={() => {
+          onRefreshSwarm(torrent.id);
+          onClose();
+        }}
+        title="Scrape the torrent's trackers again for fresh seed/leech numbers"
+      >
+        <RefreshCw className="w-3.5 h-3.5 text-cyber-green" />
+        <span>Refresh Swarm Data</span>
+      </button>
+
+      {isDeleting ? (
+        <div className="px-3 py-1.5 text-[10px] text-cyber-red">
+          Payload is being erased from disk — this entry disappears when it is done.
+        </div>
+      ) : isPaused ? (
         <button
           className={itemClass}
           onClick={() => {
@@ -238,6 +301,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
       <button
         className={itemClass}
+        disabled={isDeleting}
         onClick={() => {
           onRecheck(torrent.id);
           onClose();
@@ -313,7 +377,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         <span>Reveal Payload in Explorer</span>
       </button>
 
-      {singleFile && (
+      {(singleFile || torrent.primaryPath) && (
         <button
           className={itemClass}
           onClick={() => {
@@ -433,6 +497,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
       <button
         className={`${itemClass} hover:bg-cyber-red/15 hover:text-cyber-red`}
+        disabled={isDeleting}
         onClick={() => {
           onRemovePrompt(torrent);
           onClose();
@@ -444,6 +509,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
       <button
         className={`${itemClass} hover:bg-cyber-red/25 hover:text-cyber-red`}
+        disabled={isDeleting}
         onClick={() => {
           onDeleteFilesPrompt(torrent);
           onClose();

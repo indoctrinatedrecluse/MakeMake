@@ -24,6 +24,8 @@ import {
   AddMode,
 } from '../types/torrent';
 import { TauriBridge } from '../api/tauriBridge';
+import { WorkBand } from './gizmos/WorkBand';
+import { WorkGlyph } from './gizmos/WorkGlyph';
 
 /** What the dialog tells the engine to do with the chosen destination. */
 export interface AddConfirmOptions {
@@ -67,11 +69,28 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
   const [inputMagnet, setInputMagnet] = useState('');
   const [downloadDir, setDownloadDir] = useState(defaultDownloadDir);
   const [isLoadingMetadata, setIsLoadingMetadata] = useState(false);
+  // Live elapsed counter for the metadata wait: a 20 s spinner with no clock is the definition
+  // of "does this app still work?".
+  const [resolveElapsed, setResolveElapsed] = useState(0);
+  const resolveStartRef = useRef(0);
   const [preview, setPreview] = useState<TorrentMetadataPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [dirError, setDirError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Tick the elapsed clock only while the swarm is being interrogated.
+  useEffect(() => {
+    if (!isLoadingMetadata) {
+      setResolveElapsed(0);
+      return;
+    }
+    resolveStartRef.current = Date.now();
+    const timer = window.setInterval(() => {
+      setResolveElapsed(Math.floor((Date.now() - resolveStartRef.current) / 1000));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [isLoadingMetadata]);
 
   /** Pre-flight of the per-torrent folder (`<dir>/<torrent name>`). */
   const [existing, setExisting] = useState<ExistingPayload | null>(null);
@@ -433,14 +452,22 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
         {/* Loading Metadata Sequence */}
         {isLoadingMetadata && (
           <div className="py-16 flex flex-col items-center justify-center space-y-4">
-            <Loader2 className="w-10 h-10 text-cyber-cyan animate-spin" />
+            <WorkGlyph kind="resolve" size={44} />
+            <div className="w-full max-w-md px-6">
+              <WorkBand
+                kind="resolve"
+                label="Resolving swarm metadata"
+                detail={`Interrogating the Rapa Nui peer routing table — ${resolveElapsed}s elapsed`}
+                tone="gold"
+              />
+            </div>
             <div className="text-center">
-              <div className="text-sm font-bold font-mono text-cyber-cyan animate-pulse">
-                RESOLVING SWARM METADATA FROM DHT...
+              <div className="text-sm font-bold font-mono text-cyber-gold">
+                RESOLVING SWARM METADATA FROM DHT…
               </div>
-              <div className="text-[11px] font-mono text-slate-400 mt-1">
-                Interrogating the Rapa Nui peer routing table — up to 20 seconds. If the swarm is
-                slow the torrent is still queued and resolves in the background.
+              <div className="text-[11px] font-mono text-slate-400 mt-1 max-w-md">
+                Up to 20 seconds. If the swarm is slow the torrent is still queued and resolves in
+                the background — nothing here is stuck.
               </div>
             </div>
           </div>

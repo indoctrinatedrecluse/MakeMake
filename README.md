@@ -4,7 +4,7 @@
 ```
                      .---.
                     /     \
-                   | () () |       MAKEMAKE PROTOCOL v0.1.6
+                   | () () |       MAKEMAKE PROTOCOL v0.1.7
                     \  ^  /        [SYSTEM: AHU-ONLINE]
                      |||||         [SWARM: TANGATA-MANU ACTIVE]
                     /=====\
@@ -97,6 +97,11 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
 * Comprehensive operational menu for each data monolith, grouped into
   **Transfer / Storage / Payload / Registry** sections:
   * ⚡ **Awaken (Resume/Start)** / ⏸ **Dormant (Pause)**: Start or choke the swarm connection.
+    Both answer immediately — the engine returns the fresh row instead of leaving the UI to wait for
+    the next poll.
+  * 🌱 **Refresh Swarm Data**: scrape the trackers on demand for the seed/leecher counts.
+  * 🧭 **Live swarm telemetry** in the panel header: seeds / leechers in the swarm (tracker scrape),
+    peers connected / known, and the engine's own one-line explanation of what the torrent is doing.
   * 🔄 **Verify Obsidian Integrity (Force Recheck)**: Recalculate piece hashes against the local disk payload.
   * ⏱ **Swarm Priority** expander: High / Normal / Low (persisted, current value ticked).
   * 📂 **Open Sacred Chamber**: Open the torrent's payload folder. 🔍 **Reveal Payload** selects it in Explorer.
@@ -105,15 +110,47 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
   * 📋 **Copy to Clipboard** expander: info hash, magnet link, download path and the tracker URLs.
   * 💾 **Backup .torrent Now** and **Save .torrent As…** (native save dialog).
   * 🗑 **Remove from Swarm (Keep Files)** → 💥 **Purge Monolith & Files** (irreversible, hazard modal).
+    The purge runs on a background thread and reports back: the row stays visible as
+    `Deleting — 4 512 of 20 000 files`, then disappears with a toast naming how many files were
+    erased (and the first one that could not be), so a delete is never a silent maybe.
 * The panel measures itself before it is placed, so the destructive rows can never fall off the
   bottom of the window; it closes on scroll, resize, blur and Escape, and is keyboard navigable
   (↑/↓/Enter/Escape).
 * Header actions: **Pause all / Resume all**. Status bar: **turtle throttle** toggle.
 
-### 5. Safety Gates & Irreversible Action Modals
+### 5. Swarm Telemetry (Seeds, Leechers, Peers)
+* **Seeds and leechers come from the trackers, not from guesswork.** `librqbit` only reports the peers
+  this client is connected to, so MakeMake scrapes the torrent's announce URLs directly — HTTP(S) via
+  BEP-48 (`/announce` → `/scrape`) and UDP via BEP-15 — every 10 minutes, on add, on resume, and on
+  demand from the context menu. Overlapping answers are merged with `max`, the number of trackers that
+  replied is part of the row, and "no tracker answered" is rendered as `?` instead of a fake `0`.
+* **Every row carries the numbers**: `SEEDS / LEECH` (swarm), `PEERS connected/known`, both speeds, and
+  an **IDLE 90s** badge when a supposedly downloading torrent has not received a single verified byte
+  for a while.
+* **Every row explains itself**: a one-line status from the engine — `Verifying the data already on
+  disk — 42% hashed`, `Connecting: 0 of 40 known peer(s) live, 3 dialling`, `Connected to 3 peer(s)
+  but no data is flowing — they may not have the pieces you need (5 seed(s) in the swarm)`, `Seeding to
+  2 peer(s)` — so a stalled swarm is diagnosable without reading logs.
+* The `Wayfinding Peers` drawer tab lists the live peer registry (address, client, transport, counters)
+  plus the scraped swarm sizes for that torrent.
+* **Invisible work is never invisible.** Hashing a payload, erasing files from disk, resolving a
+  magnet and waiting for an engine slot all render as an animated band (dash-chiselled verify glyph,
+  falling purge shards, stepping-stone queue dots, a crawling magnet resolve) with the real counter
+  the engine knows — verified pieces while hashing, erased files while purging — and a radar sweep
+  next to `SEEDS` for exactly as long as a tracker scrape is in flight. States without a denominator
+  crawl instead of inventing a percentage.
+* **Every command is accounted for.** Add, start, pause, verify, purge, remove, scrape, priority, file
+  selection, backup, export and settings each appear in a floating transmitter readout with a live
+  elapsed counter, and say `STILL WORKING` after eight seconds — the window never looks wedged.
+* **One poll, one manifest.** The one-second `get_snapshot` carries the file list of the torrent the
+  drawer has open only; every other row carries its file count (and its payload path when it is a
+  single-file torrent), and the rest is fetched on demand with `get_torrent_files`. Rows are memoised
+  on the values they display, so a quiet queue costs almost nothing.
+
+### 6. Safety Gates & Irreversible Action Modals
 * Removal and deletion actions are protected by a cyberpunk hazard dialogue detailing exact file paths and sizes to prevent accidental data loss.
 
-### 6. Cyber-Polynesian UI Gizmos
+### 7. Cyber-Polynesian UI Gizmos
 * **Swarm Astrolabe**: the radar plots every managed swarm for real — the bearing is derived from the
   info hash, the radius is the verified completion of that swarm (rim = 0 %, core = 100 %), and the
   colour is its live engine state (leech / seed / paused / error). Hover a blip for its name,

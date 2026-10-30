@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Header } from './components/Header';
 import { Sidebar, TorrentFilter } from './components/Sidebar';
 import { TorrentList } from './components/TorrentList';
@@ -10,8 +10,10 @@ import { AddTorrentModal, AddConfirmOptions } from './components/AddTorrentModal
 import { SettingsModal } from './components/SettingsModal';
 import { SplashScreen } from './components/SplashScreen';
 import { TauriBridge } from './api/tauriBridge';
-import { TorrentItem, ClientSettings, SystemStats, TorrentMetadataPreview } from './types/torrent';
+import { TorrentItem, ClientSettings, SystemStats, TorrentMetadataPreview, PurgeReport } from './types/torrent';
 import { cyberAudio } from './utils/cyberAudio';
+import { OperationMonitor, PendingOp } from './components/OperationMonitor';
+import { WorkKind } from './components/gizmos/WorkGlyph';
 
 /** Compact byte formatting for the toasts (each modal keeps its own local copy). */
 const formatBytes = (bytes: number) => {
@@ -81,11 +83,49 @@ export const App: React.FC = () => {
   const [drawerTab, setDrawerTab] = useState<DetailTab>('overview');
 
   // Lightweight themed toast (replaces browser alert() popups)
-  const [toast, setToast] = useState<{ message: string; tone: 'info' | 'danger' } | null>(null);
+  const TOAST_MS = 5200;
+  const [toast, setToast] = useState<{ id: number; message: string; tone: 'info' | 'danger' } | null>(
+    null,
+  );
+  const toastSeqRef = useRef(0);
+  const toastTimerRef = useRef<number | undefined>(undefined);
   const showToast = useCallback((message: string, tone: 'info' | 'danger' = 'info') => {
-    setToast({ message, tone });
-    window.setTimeout(() => setToast(null), 3500);
+    toastSeqRef.current += 1;
+    const id = toastSeqRef.current;
+    setToast({ id, message, tone });
+    // A previous toast's timer used to be able to wipe a *newer* toast off the screen; each
+    // timer now only clears the toast it was created for.
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast((current) => (current && current.id === id ? null : current));
+    }, TOAST_MS);
   }, []);
+
+  // Commands that are already on their way to the engine. Every handler funnels through
+  // `runOp`, so a slow add/verify/purge shows a live "transmitting" readout instead of silence.
+  const [ops, setOps] = useState<PendingOp[]>([]);
+  const opSeqRef = useRef(0);
+  const runOp = useCallback(
+    async <T,>(label: string, kind: WorkKind, action: () => Promise<T>): Promise<T> => {
+      opSeqRef.current += 1;
+      const id = `op-${opSeqRef.current}`;
+      setOps((prev) => [...prev, { id, label, kind, startedAt: Date.now() }]);
+      try {
+        return await action();
+      } finally {
+        setOps((prev) => prev.filter((op) => op.id !== id));
+      }
+    },
+    [],
+  );
+
+  // Names for the operation readout. Kept in a ref so the handlers below never act on a stale
+  // copy of the queue (memoised rows keep the callbacks they were first rendered with).
+  const namesRef = useRef<Map<string, string>>(new Map());
+  const nameOf = useCallback(
+    (id: string) => namesRef.current.get(id) ?? id.slice(0, 8),
+    [],
+  );
 
   // Context Menu State
   const [contextMenu, setContextMenu] = useState<{
@@ -125,18 +165,53 @@ export const App: React.FC = () => {
   // Is anything actually moving? Drives the adaptive poll interval.
   const busyRef = useRef(false);
 
+  // Purge reports: toast each wipe exactly once, when it reports `done`.
+  const announcedPurgesRef = useRef<Set<string>>(new Set());
+  const reportPurges = useCallback(
+    (purges?: PurgeReport[]) => {
+      for (const purge of purges ?? []) {
+        if (!purge.done) continue;
+        const key = `${purge.infoHash}:${purge.filesRemoved}:${purge.filesFailed}`;
+        if (announcedPurgesRef.current.has(key)) continue;
+        announcedPurgesRef.current.add(key);
+
+        if (purge.error || purge.filesFailed > 0) {
+          showToast(
+            `${purge.name}: ${purge.filesRemoved} file(s) deleted, ${purge.filesFailed} could not be removed${
+              purge.error ? ` — ${purge.error}` : ''
+            }`,
+            'danger',
+          );
+        } else {
+          showToast(`Purged ${purge.name} — ${purge.filesRemoved} file(s) erased from disk`);
+        }
+      }
+    },
+    [showToast],
+  );
+
   const refreshData = useCallback(async () => {
     try {
-      const snapshot = await TauriBridge.getSnapshot();
+      // The drawer's torrent is the only one whose file manifest is needed; the engine sends
+      // it for that row alone (see `get_torrent_files`).
+      const snapshot = await TauriBridge.getSnapshot(selectedIdRef.current);
       setTorrents(snapshot.torrents);
       setStats(snapshot.stats);
+      reportPurges(snapshot.purges);
+
+      if (snapshot.torrents.length > 0) {
+        const names = new Map<string, string>();
+        for (const torrent of snapshot.torrents) names.set(torrent.id, torrent.name);
+        namesRef.current = names;
+      }
 
       busyRef.current = snapshot.torrents.some(
         (t) =>
           t.resolving === true ||
           t.status === 'Downloading' ||
           t.status === 'Checking' ||
-          t.status === 'Queued',
+          t.status === 'Queued' ||
+          t.status === 'Deleting',
       );
 
       // Announce a recovered session exactly once per launch.
@@ -162,7 +237,7 @@ export const App: React.FC = () => {
     } catch (e) {
       console.warn('Error refreshing MakeMake state', e);
     }
-  }, [showToast]);
+  }, [reportPurges, showToast]);
 
   // Keep the open drawer pointing at the freshest copy of the selected torrent.
   useEffect(() => {
@@ -303,10 +378,25 @@ export const App: React.FC = () => {
   }, [selectedTorrent, isAddModalOpen, isSettingsOpen]);
 
   // Operation Handlers
+  //
+  // Every handler follows the same shape:
+  //   1. ask the engine (which now *returns* the fresh row instead of Ok(())),
+  //   2. patch that row straight into the list so the click updates the UI immediately,
+  //   3. surface a failure as a toast — never as a silent no-op or a stuck spinner.
+  const applyItem = useCallback((item: TorrentItem | null) => {
+    if (!item) return;
+    setTorrents((prev) => prev.map((t) => (t.id === item.id ? item : t)));
+    if (selectedIdRef.current === item.id) {
+      setSelectedTorrent(item);
+    }
+  }, []);
+
   const handleStart = async (id: string) => {
     cyberAudio.playClick();
     try {
-      await TauriBridge.startTorrent(id);
+      applyItem(
+        await runOp(`Resuming ${nameOf(id)}`, 'transmit', () => TauriBridge.startTorrent(id)),
+      );
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
     }
@@ -316,7 +406,22 @@ export const App: React.FC = () => {
   const handlePause = async (id: string) => {
     cyberAudio.playClick();
     try {
-      await TauriBridge.pauseTorrent(id);
+      applyItem(
+        await runOp(`Pausing ${nameOf(id)}`, 'transmit', () => TauriBridge.pauseTorrent(id)),
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
+    refreshData();
+  };
+
+  const handleRefreshSwarm = async (id: string) => {
+    cyberAudio.playClick();
+    try {
+      await runOp(`Scraping trackers for ${nameOf(id)}`, 'scrape', () =>
+        TauriBridge.refreshSwarm(id),
+      );
+      showToast('Tracker scrape sent — seed/leech numbers refresh within a few seconds');
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
     }
@@ -326,7 +431,7 @@ export const App: React.FC = () => {
   const handleRecheck = async (id: string) => {
     cyberAudio.playClick();
     try {
-      await TauriBridge.forceRecheck(id);
+      await runOp(`Verifying ${nameOf(id)}`, 'verify', () => TauriBridge.forceRecheck(id));
       showToast('Integrity verification started');
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
@@ -342,7 +447,9 @@ export const App: React.FC = () => {
   const handleBackupNow = async (id: string) => {
     cyberAudio.playClick();
     try {
-      const res = await TauriBridge.backupTorrentNow(id);
+      const res = await runOp(`Archiving ${nameOf(id)}`, 'seal', () =>
+        TauriBridge.backupTorrentNow(id),
+      );
       showToast(`Torrent archived to ${res.path}`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
@@ -353,7 +460,7 @@ export const App: React.FC = () => {
   const handlePauseAll = async () => {
     cyberAudio.playHazard();
     try {
-      await TauriBridge.pauseAll();
+      await runOp('Placing every swarm in dormant state', 'transmit', () => TauriBridge.pauseAll());
       showToast('All monoliths placed in dormant state');
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
@@ -364,7 +471,7 @@ export const App: React.FC = () => {
   const handleResumeAll = async () => {
     cyberAudio.playEngage();
     try {
-      await TauriBridge.resumeAll();
+      await runOp('Re-awakening every swarm', 'transmit', () => TauriBridge.resumeAll());
       showToast('All monoliths re-awakened');
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
@@ -375,7 +482,9 @@ export const App: React.FC = () => {
   const handleSetPriority = async (id: string, priority: TorrentItem['priority']) => {
     cyberAudio.playClick();
     try {
-      await TauriBridge.setPriority(id, priority);
+      await runOp(`Setting ${priority} priority`, 'transmit', () =>
+        TauriBridge.setPriority(id, priority),
+      );
       showToast(`Priority set to ${priority}`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
@@ -388,7 +497,9 @@ export const App: React.FC = () => {
     try {
       const target = await TauriBridge.chooseSaveTorrentPath(`${torrent.name}.torrent`);
       if (!target) return;
-      const res = await TauriBridge.exportTorrent(torrent.id, target);
+      const res = await runOp(`Exporting ${torrent.name}.torrent`, 'seal', () =>
+        TauriBridge.exportTorrent(torrent.id, target),
+      );
       showToast(`.torrent metadata saved to ${res.path}`);
       refreshData();
     } catch (err) {
@@ -428,11 +539,16 @@ export const App: React.FC = () => {
     setSelectedTorrent(torrent);
     setDrawerTab('files');
     setIsDrawerOpen(true);
+    // Fetch this torrent's manifest right away (the poll only carries the selected one, and
+    // waiting for the next tick would show an empty Files tab for a moment).
+    void refreshData();
   };
 
   const handleApplyFileSelection = async (id: string, files: number[]) => {
     try {
-      await TauriBridge.setFileSelection(id, files);
+      await runOp(`Applying selection (${files.length} file${files.length === 1 ? '' : 's'})`, 'transmit', () =>
+        TauriBridge.setFileSelection(id, files),
+      );
       showToast(`Payload selection updated (${files.length} file${files.length === 1 ? '' : 's'})`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'danger');
@@ -443,7 +559,9 @@ export const App: React.FC = () => {
   const handleToggleTurtle = async () => {
     cyberAudio.playClick();
     try {
-      const updated = await TauriBridge.setTurtleMode(!settings.turtleModeEnabled);
+      const updated = await runOp('Applying bandwidth profile', 'transmit', () =>
+        TauriBridge.setTurtleMode(!settings.turtleModeEnabled),
+      );
       setSettings(updated);
       showToast(updated.turtleModeEnabled ? 'Turtle throttle engaged' : 'Full-speed throttle engaged');
     } catch (err) {
@@ -465,8 +583,17 @@ export const App: React.FC = () => {
       confirmLabel: 'REMOVE FROM REGISTRY',
       action: async () => {
         cyberAudio.playClick();
-        await TauriBridge.deleteTorrent(torrent.id, false);
+        // Close the dialog first: the engine answers immediately now, and a modal that
+        // stays open while a command runs is exactly what used to feel like a hang.
         setConfirmModal((prev) => ({ ...prev, isOpen: false }));
+        try {
+          await runOp(`Removing ${torrent.name}`, 'transmit', () =>
+            TauriBridge.deleteTorrent(torrent.id, false),
+          );
+          showToast(`${torrent.name} removed from the registry — files kept on disk`);
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : String(err), 'danger');
+        }
         refreshData();
       },
     });
@@ -481,13 +608,22 @@ export const App: React.FC = () => {
       message:
         'CRITICAL WARNING: This will permanently eradicate the torrent from the client AND delete all downloaded files from your physical disk. This action is irreversible!',
       targetName: torrent.name,
-      targetPath: `${torrent.downloadDir}/${torrent.name}`,
+      targetPath: torrent.downloadDir,
       isDestructive: true,
       confirmLabel: 'PURGE & DELETE ALL FILES',
       action: async () => {
         cyberAudio.playHazard();
-        await TauriBridge.deleteTorrent(torrent.id, true);
         setConfirmModal((prev) => ({ ...prev, isOpen: false }));
+        try {
+          await runOp(`Purging ${torrent.name}`, 'purge', () =>
+            TauriBridge.deleteTorrent(torrent.id, true),
+          );
+          // The row returns as "Deleting" (with a live file counter) and disappears when the
+          // engine has actually erased the payload; the purge report closes the loop.
+          showToast(`Purging ${torrent.name} — erasing payload files from disk…`);
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : String(err), 'danger');
+        }
         refreshData();
       },
     });
@@ -503,7 +639,13 @@ export const App: React.FC = () => {
     const mode = options?.mode ?? 'resume';
     const onDisk = options?.existing?.bytesPresent ?? 0;
     try {
-      const item = await TauriBridge.addTorrent(preview, targetDir, mode);
+      // Preparing a payload (folder creation, sparse files, file selection) can take seconds
+      // on a 20 000-file pack; the readout names the work while it runs.
+      const item = await runOp(
+        mode === 'replace' ? `Restarting ${preview.name}` : `Adding ${preview.name}`,
+        'queue',
+        () => TauriBridge.addTorrent(preview, targetDir, mode),
+      );
       selectedIdRef.current = item.id;
       setSelectedTorrent(item);
       setInitialAddPayload(null);
@@ -529,7 +671,9 @@ export const App: React.FC = () => {
   const handleSaveSettings = async (newSettings: ClientSettings) => {
     cyberAudio.playClick();
     try {
-      const updated = await TauriBridge.updateSettings(newSettings);
+      const updated = await runOp('Committing vault configuration', 'seal', () =>
+        TauriBridge.updateSettings(newSettings),
+      );
       setSettings(updated);
       setSoundEnabled(updated.enableSoundFx);
       cyberAudio.enabled = updated.enableSoundFx;
@@ -546,16 +690,18 @@ export const App: React.FC = () => {
     if (next) cyberAudio.playClick();
   };
 
-  const counts = {
-    all: torrents.length,
-    active: torrents.filter(
-      (t) =>
-        t.resolving === true || t.status === 'Downloading' || t.status === 'Seeding',
-    ).length,
-    completed: torrents.filter((t) => t.status === 'Seeding' || t.progress >= 100).length,
-    paused: torrents.filter((t) => t.status === 'Paused').length,
-    backedUp: torrents.filter((t) => t.backedUp).length,
-  };
+  const counts = useMemo(
+    () => ({
+      all: torrents.length,
+      active: torrents.filter(
+        (t) => t.resolving === true || t.status === 'Downloading' || t.status === 'Seeding',
+      ).length,
+      completed: torrents.filter((t) => t.status === 'Seeding' || t.progress >= 100).length,
+      paused: torrents.filter((t) => t.status === 'Paused').length,
+      backedUp: torrents.filter((t) => t.backedUp).length,
+    }),
+    [torrents],
+  );
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-obsidian-950 font-mono text-slate-100 select-none">
@@ -629,6 +775,8 @@ export const App: React.FC = () => {
             onSelectTorrent={(t) => {
               selectedIdRef.current = t.id;
               setSelectedTorrent(t);
+              // Pull this torrent's file manifest immediately instead of waiting for the tick.
+              void refreshData();
             }}
             onContextMenu={(e, t) => {
               e.preventDefault();
@@ -701,6 +849,7 @@ export const App: React.FC = () => {
           onOpenPath={handleOpenPath}
           onCopy={handleCopy}
           onSetPriority={handleSetPriority}
+          onRefreshSwarm={handleRefreshSwarm}
           onBackupNow={handleBackupNow}
           onExportTorrent={handleExportTorrent}
           onEditFiles={handleEditFiles}
@@ -741,17 +890,28 @@ export const App: React.FC = () => {
         onSave={handleSaveSettings}
       />
 
+      {/* Commands in flight: a live readout so a slow engine call never reads as a freeze */}
+      <OperationMonitor ops={ops} />
+
       {/* Themed Toast Notifications */}
       {toast && (
         <div
-          className={`fixed bottom-12 right-5 z-[60] max-w-md px-4 py-2.5 rounded-lg border font-mono text-[11px] shadow-2xl backdrop-blur-md animate-fadeIn ${
+          key={toast.id}
+          className={`fixed bottom-12 right-5 z-[60] w-[22rem] overflow-hidden rounded-lg border font-mono text-[11px] shadow-2xl backdrop-blur-md animate-fadeIn ${
             toast.tone === 'danger'
               ? 'bg-red-950/90 border-cyber-red/60 text-red-200'
               : 'bg-obsidian-900/95 border-cyber-cyan/50 text-cyber-cyan'
           }`}
           role="status"
         >
-          {toast.message}
+          <div className="px-4 py-2.5">{toast.message}</div>
+          {/* The countdown is visible, so a toast disappearing is never a surprise. */}
+          <div
+            className={`h-[2px] anim-toast-drain ${
+              toast.tone === 'danger' ? 'bg-cyber-red/70' : 'bg-cyber-cyan/70'
+            }`}
+            style={{ animationDuration: `${TOAST_MS}ms` }}
+          />
         </div>
       )}
     </div>

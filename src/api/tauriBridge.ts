@@ -6,6 +6,7 @@ import {
   PeerDetail,
   TorrentSnapshot,
   TorrentDiskUsage,
+  TorrentFilesPayload,
   ExistingPayload,
   AddMode,
 } from '../types/torrent';
@@ -175,8 +176,15 @@ class DevStore {
       status: 'Queued',
       peersConnected: 0,
       peersTotal: 0,
-      seedsConnected: 0,
+      peersConnecting: 0,
+      peersQueued: 0,
+      peersDead: 0,
       seedsTotal: 0,
+      leechersTotal: 0,
+      swarmSources: 0,
+      swarmCheckedAt: 0,
+      statusDetail: 'Queued: waiting for the engine to start verifying this torrent',
+      stalledSeconds: 0,
       etaSeconds: null,
       downloadDir: targetDir,
       files: preview.files,
@@ -190,6 +198,12 @@ class DevStore {
       backedUp: false,
       backupPath: undefined,
       priority: 'Normal',
+      fileCount: preview.files.length,
+      primaryPath:
+        preview.files.length === 1
+          ? `${targetDir}/${preview.files[0].path || preview.files[0].name}`
+          : undefined,
+      swarmRefreshing: false,
     };
     this.torrents = [item, ...this.torrents.filter((t) => t.id !== item.id)];
     return item;
@@ -282,12 +296,32 @@ export const TauriBridge = {
   /**
    * One poll = one IPC round trip. The window used to ask for the torrent list and the
    * system stats separately, which made the engine walk the whole queue twice per tick.
+   *
+   * `selectedId` is the torrent the details drawer has open. Only that row carries its full
+   * file manifest, so a big pack no longer ships thousands of paths on every tick.
    */
-  async getSnapshot(): Promise<TorrentSnapshot> {
+  async getSnapshot(selectedId?: string | null): Promise<TorrentSnapshot> {
     if (isTauriEnv()) {
-      return invokeTauri<TorrentSnapshot>('get_snapshot');
+      return invokeTauri<TorrentSnapshot>('get_snapshot', { selected: selectedId ?? null });
     }
     return { torrents: devStore.getTorrents(), stats: devStore.getSystemStats() };
+  },
+
+  /**
+   * Full payload manifest of one torrent (paths + per-file progress).
+   *
+   * Needed when a torrent is not the one in the snapshot's `selected` slot: opening the Files
+   * tab right after switching rows, or "Select files…" from the context menu.
+   */
+  async getTorrentFiles(id: string): Promise<TorrentFilesPayload> {
+    if (isTauriEnv()) {
+      return invokeTauri<TorrentFilesPayload>('get_torrent_files', { id });
+    }
+    const torrent = devStore.getTorrents().find((t) => t.id === id);
+    return {
+      files: torrent?.files ?? [],
+      fileProgress: torrent?.fileProgress ?? [],
+    };
   },
 
   /** Re-arm a queued magnet whose metadata resolution failed. */
@@ -333,20 +367,34 @@ export const TauriBridge = {
     return devStore.updateSettings(settings);
   },
 
-  async startTorrent(id: string): Promise<void> {
+  /**
+   * Resume a swarm. Returns the engine's fresh row so the list updates on the click, not on
+   * the next poll.
+   */
+  async startTorrent(id: string): Promise<TorrentItem | null> {
     if (isTauriEnv()) {
-      await invokeTauri<void>('start_torrent', { id });
-      return;
+      return invokeTauri<TorrentItem>('start_torrent', { id });
     }
     devStore.startTorrent(id);
+    return devStore.getTorrents().find((t) => t.id === id) ?? null;
   },
 
-  async pauseTorrent(id: string): Promise<void> {
+  /** Pause a swarm; returns the fresh row (see {@link startTorrent}). */
+  async pauseTorrent(id: string): Promise<TorrentItem | null> {
     if (isTauriEnv()) {
-      await invokeTauri<void>('pause_torrent', { id });
-      return;
+      return invokeTauri<TorrentItem>('pause_torrent', { id });
     }
     devStore.pauseTorrent(id);
+    return devStore.getTorrents().find((t) => t.id === id) ?? null;
+  },
+
+  /** Ask the trackers for the swarm size right now (seeds/leechers). */
+  async refreshSwarm(id: string): Promise<void> {
+    if (isTauriEnv()) {
+      await invokeTauri<void>('refresh_swarm', { id });
+      return;
+    }
+    // The browser dev store has no trackers to ask.
   },
 
   async forceRecheck(id: string): Promise<void> {

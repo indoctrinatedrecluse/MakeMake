@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   X,
   Maximize2,
@@ -19,8 +19,9 @@ import {
   Save,
   ExternalLink,
 } from 'lucide-react';
-import { TorrentItem, TorrentFileItem, PeerDetail, TorrentDiskUsage } from '../types/torrent';
+import { TorrentItem, TorrentFileItem, TorrentFilesPayload, PeerDetail, TorrentDiskUsage } from '../types/torrent';
 import { CyberProgressBar } from './gizmos/CyberProgressBar';
+import { WorkBand, deriveHiddenWork } from './gizmos/WorkBand';
 import { SpeedOscilloscope } from './gizmos/SpeedOscilloscope';
 import { AhuBlockMatrix } from './gizmos/AhuBlockMatrix';
 import { cyberAudio } from '../utils/cyberAudio';
@@ -70,7 +71,49 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
   // File lists can hold tens of thousands of entries; only ever render a window of them and
   // fold the rest behind "show more". Building the signature below from the whole list (as
   // this used to) allocated a string the size of the file count on every single render.
-  const files = useMemo(() => torrent.files ?? [], [torrent.files]);
+  //
+  // The engine only ships the manifest of the torrent in the snapshot's `selected` slot, so a
+  // row that is opened between two polls asks for it once (`get_torrent_files`) instead of
+  // rendering an empty Files tab. The payload is tagged with its own info hash: a manifest that
+  // arrives after the user switched rows must never be shown for the new row.
+  const [manifest, setManifest] = useState<{ id: string; payload: TorrentFilesPayload } | null>(
+    null,
+  );
+  const manifestKeyRef = useRef('');
+
+  useEffect(() => {
+    const key = `${torrent.id}:${torrent.fileCount ?? 0}`;
+    if ((torrent.files?.length ?? 0) > 0) {
+      manifestKeyRef.current = key;
+      return;
+    }
+    if ((torrent.fileCount ?? 0) === 0 || manifestKeyRef.current === key) return;
+
+    manifestKeyRef.current = key;
+    let cancelled = false;
+    TauriBridge.getTorrentFiles(torrent.id)
+      .then((payload) => {
+        if (!cancelled) setManifest({ id: torrent.id, payload });
+      })
+      .catch(() => {
+        // The next poll carries it if the engine can serve it; allow another attempt.
+        manifestKeyRef.current = '';
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [torrent.id, torrent.fileCount, torrent.files]);
+
+  const fetched = manifest && manifest.id === torrent.id ? manifest.payload : null;
+  const files = useMemo(
+    () =>
+      (torrent.files?.length ?? 0) > 0 ? torrent.files : fetched?.files ?? ([] as TorrentFileItem[]),
+    [torrent.files, fetched],
+  );
+  const fileProgress = (torrent.files?.length ?? 0) > 0 ? torrent.fileProgress : fetched?.fileProgress;
+  const fileCount = torrent.fileCount ?? files.length;
+  const hiddenWork = deriveHiddenWork(torrent);
+
   const [visibleFiles, setVisibleFiles] = useState(FILES_PAGE);
   const shownFiles = useMemo(() => files.slice(0, visibleFiles), [files, visibleFiles]);
 
@@ -193,7 +236,7 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
             { id: 'overview' as DetailTab, label: 'Overview', icon: Info },
             { id: 'graph' as DetailTab, label: 'Speed Graph', icon: Activity },
             { id: 'peers' as DetailTab, label: `Wayfinding Peers (${torrent.peersConnected})`, icon: Users },
-            { id: 'files' as DetailTab, label: `Files (${torrent.files.length})`, icon: FileCode },
+            { id: 'files' as DetailTab, label: `Files (${fileCount})`, icon: FileCode },
             { id: 'pieces' as DetailTab, label: 'Piece Matrix', icon: Grid },
             { id: 'trackers' as DetailTab, label: `Oracles / Trackers (${trackers.length})`, icon: Radio },
           ].map((tab) => {
@@ -241,6 +284,19 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
 
       {/* Drawer Content Body */}
       <div className="flex-1 overflow-y-auto p-4 text-xs font-mono text-slate-300">
+        {/* Hidden work (hashing / purging / resolving / queueing) is shown on every tab, so
+            opening the inspector mid-verify never looks like a dead panel. */}
+        {hiddenWork && (
+          <WorkBand
+            kind={hiddenWork.kind}
+            label={hiddenWork.label}
+            detail={hiddenWork.detail}
+            progress={hiddenWork.progress}
+            counter={hiddenWork.counter}
+            tone={hiddenWork.tone}
+            className="mb-3"
+          />
+        )}
         {/* TAB 1: OVERVIEW */}
         {activeTab === 'overview' && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -333,6 +389,22 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                   />
                 </div>
 
+                {/* The engine's own explanation of the current phase (why it is or is not
+                    moving, how many peers it sees, what the trackers report). */}
+                {torrent.statusDetail && (
+                  <div
+                    className={`p-2 rounded border text-[10px] font-mono leading-relaxed ${
+                      torrent.status === 'Error'
+                        ? 'border-cyber-red/40 bg-cyber-red/10 text-cyber-red'
+                        : torrent.stalledSeconds >= 45 && torrent.status === 'Downloading'
+                          ? 'border-cyber-gold/40 bg-cyber-gold/10 text-cyber-gold'
+                          : 'border-slate-800 bg-obsidian-950/80 text-slate-400'
+                    }`}
+                  >
+                    {torrent.statusDetail}
+                  </div>
+                )}
+
                 <div className="p-2.5 rounded bg-obsidian-950 border border-slate-800/80 space-y-1.5 text-[11px]">
                   <div className="flex items-center justify-between">
                     <span className="text-slate-400">TEMPORAL BACKUP:</span>
@@ -402,6 +474,18 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                   <span className="text-slate-200 font-bold">{torrent.peersConnected} of {torrent.peersTotal}</span>
                 </div>
                 <div className="flex justify-between">
+                  <span className="text-slate-400">SWARM SEEDS:</span>
+                  <span className="text-cyber-green font-bold">
+                    {torrent.swarmSources > 0 ? torrent.seedsTotal : 'unknown'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">SWARM LEECHERS:</span>
+                  <span className="text-cyber-gold font-bold">
+                    {torrent.swarmSources > 0 ? torrent.leechersTotal : 'unknown'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
                   <span className="text-slate-400">PRIORITY:</span>
                   <span className="text-cyber-gold font-bold uppercase">{torrent.priority}</span>
                 </div>
@@ -428,6 +512,16 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
               {[
                 { label: 'LIVE PEERS', value: torrent.peersConnected, tone: 'text-cyber-cyan' },
                 { label: 'PEERS SEEN', value: torrent.peersTotal, tone: 'text-slate-200' },
+                {
+                  label: 'SEEDS (SWARM)',
+                  value: torrent.swarmSources > 0 ? torrent.seedsTotal : '?',
+                  tone: 'text-cyber-green',
+                },
+                {
+                  label: 'LEECHERS (SWARM)',
+                  value: torrent.swarmSources > 0 ? torrent.leechersTotal : '?',
+                  tone: 'text-cyber-gold',
+                },
                 { label: 'DOWN RATE', value: formatSpeed(torrent.downloadSpeed), tone: 'text-cyber-cyan' },
                 { label: 'UP RATE', value: formatSpeed(torrent.uploadSpeed), tone: 'text-cyber-red' },
               ].map((stat) => (
@@ -492,11 +586,21 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
         {/* TAB 4: FILES (with real per-file progress and payload selection) */}
         {activeTab === 'files' && (
           <div className="space-y-2">
+            {/* The manifest of a torrent that was selected between two polls arrives within a
+                few hundred milliseconds; say so instead of showing an empty table. */}
+            {fileCount > 0 && files.length === 0 && (
+              <WorkBand
+                kind="transmit"
+                label="Syncing file manifest"
+                detail={`Reading the payload list of ${fileCount} file(s) from the engine`}
+                tone="cyan"
+              />
+            )}
             <div className="flex items-center justify-between text-[11px] font-mono">
               <div className="flex items-center gap-2 text-slate-400">
                 <button
                   onClick={() => {
-                    setSelection(new Set(torrent.files.map((f) => f.index)));
+                    setSelection(new Set(files.map((f) => f.index)));
                     setSelectionDirty(true);
                   }}
                   className="text-cyber-cyan hover:underline"
@@ -515,7 +619,7 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                 </button>
                 <span className="text-slate-600">•</span>
                 <span>
-                  {selection.size}/{torrent.files.length} selected
+                  {selection.size}/{fileCount} selected
                 </span>
               </div>
 
@@ -550,8 +654,9 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                 </thead>
               <tbody className="divide-y divide-slate-800/60 bg-obsidian-950/80">
                 {shownFiles.map((file: TorrentFileItem) => {
-                  const downloadedForFile = torrent.fileProgress?.[file.index];
-                  const fileProgress =
+                  const downloadedForFile = fileProgress?.[file.index];
+                  // Deliberately not called `fileProgress`: that is the per-file byte array.
+                  const filePercent =
                     downloadedForFile !== undefined && file.length > 0
                       ? Math.min(100, (downloadedForFile / file.length) * 100)
                       : torrent.progress;
@@ -586,10 +691,10 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                         <div className="flex-1 h-1.5 bg-slate-800 rounded overflow-hidden">
                           <div
                             className="h-full bg-cyber-cyan"
-                            style={{ width: `${fileProgress}%` }}
+                            style={{ width: `${filePercent}%` }}
                           />
                         </div>
-                        <span className="text-[10px] text-cyber-cyan">{fileProgress.toFixed(0)}%</span>
+                        <span className="text-[10px] text-cyber-cyan">{filePercent.toFixed(0)}%</span>
                       </div>
                     </td>
                     <td className="px-3 py-2">

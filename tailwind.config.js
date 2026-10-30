@@ -44,12 +44,19 @@ export default {
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
         'flicker': 'flicker 0.15s ease-in-out infinite alternate',
         'scanline': 'scanline 6s linear infinite',
+        // Modals, menus and toasts were already asking for `animate-fadeIn`, which was never
+        // defined — they simply appeared. This makes the request real.
+        'fadeIn': 'fadeIn 0.18s ease-out',
       },
       keyframes: {
         scanline: {
           '0%': { transform: 'translateY(-100%)' },
           '100%': { transform: 'translateY(1000%)' },
-        }
+        },
+        fadeIn: {
+          '0%': { opacity: '0', transform: 'translateY(6px) scale(0.995)' },
+          '100%': { opacity: '1', transform: 'translateY(0) scale(1)' },
+        },
       }
     },
   },

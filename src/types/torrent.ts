@@ -68,11 +68,33 @@ export interface TorrentItem {
     | 'Queued'
     | 'Resolving'
     | 'Completed'
+    | 'Deleting'
     | 'Error';
   peersConnected: number;
   peersTotal: number;
-  seedsConnected: number;
+  /** Peers in a handshake right now. */
+  peersConnecting: number;
+  /** Peers discovered but not dialled yet. */
+  peersQueued: number;
+  /** Peers the engine gave up on (timeouts, refusals). */
+  peersDead: number;
+  /**
+   * Seeds in the swarm, scraped from the torrent's trackers.
+   *
+   * `swarmSources === 0` means no tracker answered (DHT-only torrent, private tracker down),
+   * so `0` seeds must be shown as "unknown" rather than as an empty swarm.
+   */
   seedsTotal: number;
+  /** Leechers in the swarm, from the same scrape. */
+  leechersTotal: number;
+  /** Trackers that answered the last scrape. */
+  swarmSources: number;
+  /** Unix ms of the last scrape attempt (0 = never). */
+  swarmCheckedAt: number;
+  /** One sentence explaining what this swarm is doing right now. */
+  statusDetail: string;
+  /** Seconds running without a single new verified byte (0 = moving). */
+  stalledSeconds: number;
   etaSeconds: number | null;
   downloadDir: string;
   files: TorrentFileItem[];
@@ -90,6 +112,27 @@ export interface TorrentItem {
   error?: string | null;
   /** True while the torrent is a queued magnet that has not resolved its metadata yet. */
   resolving?: boolean;
+  /** True while this entry's payload is being erased from disk. */
+  deleting?: boolean;
+  /**
+   * Number of payload files.
+   *
+   * The manifest itself (`files`) is only sent for the torrent the details drawer is showing —
+   * a 20 000-file pack would otherwise travel through IPC on every poll. Everything else asks
+   * `TauriBridge.getTorrentFiles` for it explicitly.
+   */
+  fileCount?: number;
+  /** Absolute path of the payload for single-file torrents (`undefined` for multi-file ones). */
+  primaryPath?: string;
+  /** A tracker scrape for this torrent is running right now. */
+  swarmRefreshing?: boolean;
+}
+
+/** Full payload manifest of one torrent, fetched on demand (see `get_torrent_files`). */
+export interface TorrentFilesPayload {
+  files: TorrentFileItem[];
+  /** Per-file downloaded bytes, aligned with `files`. */
+  fileProgress: number[];
 }
 
 export interface PeerDetail {
@@ -129,6 +172,27 @@ export interface ClientSettings {
 export interface TorrentSnapshot {
   torrents: TorrentItem[];
   stats: SystemStats;
+  /** Payload wipes currently running (or just finished, for a few seconds). */
+  purges?: PurgeReport[];
+}
+
+/**
+ * One payload wipe ("Purge Monolith & Files").
+ *
+ * The engine deletes the files on a background thread and reports how it went: the UI keeps
+ * the row visible with a file counter until `done`, then toasts `filesRemoved` /
+ * `filesFailed` once.
+ */
+export interface PurgeReport {
+  infoHash: string;
+  name: string;
+  dir: string;
+  filesTotal: number;
+  filesDone: number;
+  filesRemoved: number;
+  filesFailed: number;
+  done: boolean;
+  error?: string | null;
 }
 
 /**
