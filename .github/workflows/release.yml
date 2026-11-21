@@ -58,7 +58,6 @@ jobs:
             3. Launch MakeMake from the Start menu and drop in a `.torrent` file or a magnet link.
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true
-          uploadUpdaterSignatures: true
+          includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: --bundles nsis
