@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MakeMake",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "identifier": "org.makemake.app",
   "build": {
     "frontendDist": "../dist",
@@ -30,6 +30,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "copyright": "Copyright 2026 Abhishek Mitra (indoctrinatedrecluse)",
     "license": "Apache-2.0",
@@ -49,6 +50,14 @@
         "sidebarImage": "installer/installer-sidebar.bmp",
         "uninstallerHeaderImage": "installer/uninstaller-header.bmp"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyN0M4ODFCNjM3RDk3QUEKUldTcWwzMWpHNGg4Z2gyVTkya0pXTzM3MUtJYThscFFWbEZmSXNOQlZ5WXB2ZzNCZkhXQmhaU0QK",
+      "endpoints": [
+        "https://github.com/indoctrinatedrecluse/MakeMake/releases/latest/download/latest.json"
+      ]
     }
   }
 }

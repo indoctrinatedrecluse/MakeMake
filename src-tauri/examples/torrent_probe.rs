@@ -42,7 +42,6 @@ fn describe(stats: &librqbit::TorrentStats) -> String {
     }
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -111,7 +110,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for round in 1..=rounds {
         let before = dir_bytes(&output_dir);
         let started = Instant::now();
-        println!("--- round {round}: {:.2} GiB on disk before add ---", gib(before));
+        println!(
+            "--- round {round}: {:.2} GiB on disk before add ---",
+            gib(before)
+        );
 
         let opts = AddTorrentOptions {
             paused: !live,
@@ -240,6 +242,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("done; leaving {} in place for inspection", output_dir.display());
+    println!(
+        "done; leaving {} in place for inspection",
+        output_dir.display()
+    );
     Ok(())
 }

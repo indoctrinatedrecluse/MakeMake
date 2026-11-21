@@ -26,6 +26,7 @@ import {
 import { TauriBridge } from '../api/tauriBridge';
 import { WorkBand } from './gizmos/WorkBand';
 import { WorkGlyph } from './gizmos/WorkGlyph';
+import { formatBytes } from '../utils/format';
 
 /** What the dialog tells the engine to do with the chosen destination. */
 export interface AddConfirmOptions {
@@ -48,14 +49,6 @@ interface AddTorrentModalProps {
     options: AddConfirmOptions,
   ) => void;
 }
-
-const formatBytes = (bytes: number) => {
-  if (!bytes || bytes <= 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
-};
 
 export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({
   isOpen,

@@ -1,5 +1,5 @@
-use tauri::State;
 use std::process::Command;
+use tauri::State;
 
 use crate::engine::TorrentEngine;
 use crate::models::{

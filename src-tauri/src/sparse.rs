@@ -114,8 +114,8 @@ fn mark_sparse(file: &fs::File) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
 
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::IO::DeviceIoControl;
     use windows::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+    use windows::Win32::System::IO::DeviceIoControl;
 
     // Unlike librqbit's call, `lpBytesReturned` is a real pointer: Windows requires it
     // whenever `lpOverlapped` is NULL.
@@ -604,7 +604,8 @@ mod tests {
 
     #[test]
     fn a_directory_on_a_payload_path_is_skipped_not_fatal() {
-        let root = std::env::temp_dir().join(format!("makemake-sparse-skip-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("makemake-sparse-skip-{}", std::process::id()));
         fs::remove_dir_all(&root).ok();
         fs::create_dir_all(&root).unwrap();
 
@@ -669,7 +670,8 @@ mod tests {
 
     #[test]
     fn nested_directories_are_created_once_per_directory() {
-        let root = std::env::temp_dir().join(format!("makemake-sparse-nested-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("makemake-sparse-nested-{}", std::process::id()));
         fs::remove_dir_all(&root).ok();
         fs::create_dir_all(&root).unwrap();
 
@@ -759,10 +761,19 @@ mod tests {
         ];
 
         assert_eq!(wipe_payload(&root, &files).unwrap(), 1);
-        assert!(!root.join("pack/movie.mkv").exists(), "payload must be gone");
-        assert!(root.join("pack/notes.txt").is_file(), "foreign files must survive");
+        assert!(
+            !root.join("pack/movie.mkv").exists(),
+            "payload must be gone"
+        );
+        assert!(
+            root.join("pack/notes.txt").is_file(),
+            "foreign files must survive"
+        );
         assert!(root.join("stray.bin").is_file());
-        assert!(root.join("pack/empty").is_dir(), "a directory is never deleted");
+        assert!(
+            root.join("pack/empty").is_dir(),
+            "a directory is never deleted"
+        );
         assert!(root.is_dir(), "the payload folder itself always stays");
 
         // Idempotent: a second pass finds nothing to delete.
@@ -774,7 +785,8 @@ mod tests {
     /// A hostile payload path must never turn into a delete outside the torrent's folder.
     #[test]
     fn wipe_refuses_paths_outside_the_output_folder() {
-        let root = std::env::temp_dir().join(format!("makemake-wipe-escape-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("makemake-wipe-escape-{}", std::process::id()));
         fs::remove_dir_all(&root).ok();
         let output = root.join("torrent");
         fs::create_dir_all(&output).unwrap();

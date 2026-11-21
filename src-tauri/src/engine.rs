@@ -20,7 +20,7 @@ use base64::Engine as _;
 use librqbit::api::TorrentIdOrHash;
 use librqbit::limits::LimitsConfig;
 use librqbit::{
-    torrent_from_bytes, AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig,
+    torrent_from_bytes, AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, DhtSessionConfig,
     ListenerOptions, Magnet, ManagedTorrent, Session, SessionOptions, SessionPersistenceConfig,
     TorrentStats, TorrentStatsState, ValidatedTorrentMetaV1Info,
 };
@@ -86,8 +86,6 @@ const SWARM_RETRY: Duration = Duration::from_secs(90);
 
 /// A finished purge report stays in the snapshot for this long so the window can toast it.
 const PURGE_REPORT_TTL: Duration = Duration::from_secs(30);
-
-
 
 /// Per-torrent data that librqbit does not track itself but the UI needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +285,7 @@ impl PendingAdd {
             piece_count: self.piece_count,
             pieces_completed: 0,
             pieces_bitfield: vec![0u8; COARSE_BUCKETS],
+            piece_map_exact: false,
             file_progress: if include_files {
                 vec![0u64; self.files.len()]
             } else {
@@ -314,7 +313,6 @@ impl PendingAdd {
         }
     }
 }
-
 
 /// Read the announce URLs out of the torrent metadata that librqbit resolved.
 /// Returns `true` when the cached list changed (so the state file gets rewritten).
@@ -468,11 +466,7 @@ struct PurgeJob {
 impl PurgeJob {
     fn report(&self) -> PurgeReport {
         let done = self.progress.load(Ordering::Relaxed);
-        let outcome = self
-            .outcome
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone());
+        let outcome = self.outcome.lock().ok().and_then(|slot| slot.clone());
         let finished = self.finished.load(Ordering::SeqCst);
         let (removed, failed, error) = outcome.unwrap_or_default();
         PurgeReport {
@@ -739,8 +733,10 @@ impl TorrentEngine {
     /// never magically re-start a torrent the user had paused.
     async fn restore_previous_session(&self, session: &Arc<Session>) {
         let handles = Self::handles(session);
-        self.restored
-            .store(handles.len().min(u32::MAX as usize) as u32, Ordering::SeqCst);
+        self.restored.store(
+            handles.len().min(u32::MAX as usize) as u32,
+            Ordering::SeqCst,
+        );
 
         if handles.is_empty() {
             log::info!("no torrents to restore");
@@ -843,7 +839,10 @@ impl TorrentEngine {
         })
     }
 
-    fn find_handle(session: &Arc<Session>, info_hash: &str) -> Option<(usize, Arc<ManagedTorrent>)> {
+    fn find_handle(
+        session: &Arc<Session>,
+        info_hash: &str,
+    ) -> Option<(usize, Arc<ManagedTorrent>)> {
         session.with_torrents(|iter| {
             let mut found = None;
             for (id, handle) in iter {
@@ -1040,6 +1039,7 @@ impl TorrentEngine {
 
     async fn collect_items(&self, selected: Option<&str>) -> Result<Vec<TorrentItem>, String> {
         let session = self.session().await?;
+        let api = Api::new(session.clone(), None);
         let handles = Self::handles(&session);
         let settings = self.settings.read().await.clone();
 
@@ -1062,8 +1062,8 @@ impl TorrentEngine {
 
             // Only one poll owns a swarm at a time: the UI asks for the torrent list and
             // the system stats in parallel, and both walk this loop.
-            let owns_vault = !self.is_shutting_down()
-                && self.maintenance.lock().await.insert(info_hash.clone());
+            let owns_vault =
+                !self.is_shutting_down() && self.maintenance.lock().await.insert(info_hash.clone());
 
             // Self-healing restore: a swarm that was live when the app last closed is
             // re-added paused and has to re-verify its pieces. librqbit drops unpauses
@@ -1071,8 +1071,8 @@ impl TorrentEngine {
             // pause right after we win), so keep asking until the swarm has been live for
             // a few consecutive polls. Only swarms the launch-time restore selected are in
             // this map, so an explicit pause can never be fought by this loop.
-            let awaiting_rearm = owns_vault
-                && self.pending_rearm.lock().await.contains_key(&info_hash);
+            let awaiting_rearm =
+                owns_vault && self.pending_rearm.lock().await.contains_key(&info_hash);
             if awaiting_rearm {
                 if is_running(&stats) {
                     let mut pending = self.pending_rearm.lock().await;
@@ -1200,7 +1200,8 @@ impl TorrentEngine {
             // (network I/O with its own timeouts); this call only decides *whether* one is
             // due, so the 1 s poll can never wait on a tracker. The tracker list itself was
             // filled in above (see `fill_trackers`).
-            self.request_swarm_refresh(&info_hash, &extras.trackers).await;
+            self.request_swarm_refresh(&info_hash, &extras.trackers)
+                .await;
             let swarm = self
                 .swarm
                 .lock()
@@ -1219,10 +1220,7 @@ impl TorrentEngine {
                 .as_ref()
                 .map(|live| live.download_speed.as_bytes())
                 .unwrap_or(0);
-            let mut watch = watch_map
-                .get(&info_hash)
-                .copied()
-                .unwrap_or_default();
+            let mut watch = watch_map.get(&info_hash).copied().unwrap_or_default();
             if is_running(&stats) && !stats.finished {
                 if downloaded_bytes > watch.bytes || live_speed > 0 {
                     watch.bytes = downloaded_bytes;
@@ -1242,7 +1240,7 @@ impl TorrentEngine {
             };
             watch_map.insert(info_hash.clone(), watch);
 
-            items.push(build_item(
+            let mut item = build_item(
                 &handle,
                 &stats,
                 &extras,
@@ -1250,7 +1248,24 @@ impl TorrentEngine {
                 swarm,
                 stalled_seconds,
                 selected == Some(info_hash.as_str()),
-            ));
+            );
+            // Only the selected torrent gets the exact bitfield; copying haves for the full
+            // queue on every poll would undo the lightweight snapshot. Other rows keep the
+            // compact byte-progress estimate and label it as such.
+            if selected == Some(info_hash.as_str()) {
+                if let Ok(idx) = TorrentIdOrHash::try_from(info_hash.as_str()) {
+                    if let Ok((haves, piece_count)) = api.api_dump_haves(idx) {
+                        let (map, completed) =
+                            piece_map_from_haves(piece_count as usize, |index| {
+                                haves.get(index).is_some_and(|have| *have)
+                            });
+                        item.pieces_bitfield = map;
+                        item.pieces_completed = completed;
+                        item.piece_map_exact = true;
+                    }
+                }
+            }
+            items.push(item);
 
             extras_map.insert(info_hash, extras);
             state_changed |= is_new;
@@ -2074,7 +2089,6 @@ impl TorrentEngine {
         Ok(())
     }
 
-
     /// Resume a swarm and return its **fresh** row.
     ///
     /// Returning the item matters: the window used to wait for the next 1 s poll to see any
@@ -2098,8 +2112,7 @@ impl TorrentEngine {
             let resumed = tokio::time::timeout(CONTROL_TIMEOUT, session.unpause(&handle))
                 .await
                 .map_err(|_| {
-                    "the engine did not resume this torrent in time; it is still paused"
-                        .to_string()
+                    "the engine did not resume this torrent in time; it is still paused".to_string()
                 })?;
             resumed.map_err(|e| format!("cannot resume torrent: {e}"))?;
         }
@@ -2136,7 +2149,13 @@ impl TorrentEngine {
             .ok_or_else(|| format!("torrent {info_hash} is not managed by this session"))?;
 
         let stats = handle.stats();
-        let mut extras = self.extras.lock().await.get(info_hash).cloned().unwrap_or_default();
+        let mut extras = self
+            .extras
+            .lock()
+            .await
+            .get(info_hash)
+            .cloned()
+            .unwrap_or_default();
         fill_trackers(&handle, &mut extras);
         let meta = self.meta_cache.lock().await.get(info_hash).cloned();
         let swarm = self
@@ -2208,9 +2227,7 @@ impl TorrentEngine {
         };
 
         let stats = handle.stats();
-        let mut files = meta
-            .map(|meta| meta.files.clone())
-            .unwrap_or_default();
+        let mut files = meta.map(|meta| meta.files.clone()).unwrap_or_default();
         if let Some(only_files) = handle.only_files() {
             for file in files.iter_mut() {
                 file.selected = only_files.contains(&file.index);
@@ -2228,12 +2245,13 @@ impl TorrentEngine {
         })
     }
 
-
     /// Record whether this swarm should be running again after a restart.
     async fn set_resume_intent(&self, info_hash: &str, running: bool) {
         {
             let mut map = self.extras.lock().await;
-            map.entry(info_hash.to_string()).or_default().resume_on_start = running;
+            map.entry(info_hash.to_string())
+                .or_default()
+                .resume_on_start = running;
         }
         // An explicit user action always wins over the launch-time re-arm loop.
         self.pending_rearm.lock().await.remove(info_hash);
@@ -2519,7 +2537,6 @@ impl TorrentEngine {
         }
         self.request_swarm_refresh(info_hash, &trackers).await;
     }
-
 
     /// Pause every torrent in the session (a real pause: connections are dropped).
     pub async fn pause_all(&self) -> Result<(), String> {
@@ -2809,7 +2826,10 @@ impl TorrentEngine {
         let tmp = file.with_extension("torrent.tmp");
         fs::write(&tmp, torrent_bytes.as_ref()).ok()?;
         if let Err(err) = fs::rename(&tmp, &file) {
-            log::warn!("cannot archive torrent metadata to {}: {err}", file.display());
+            log::warn!(
+                "cannot archive torrent metadata to {}: {err}",
+                file.display()
+            );
             fs::remove_file(&tmp).ok();
             return None;
         }
@@ -3299,8 +3319,8 @@ struct PayloadLayout {
 ///
 /// Fails only when the metadata itself is unusable (corrupt bencode, invalid info dict).
 fn payload_layout(torrent_bytes: &[u8], base_dir: &Path) -> Result<PayloadLayout, String> {
-    let parsed = torrent_from_bytes(torrent_bytes)
-        .map_err(|e| format!("invalid .torrent payload: {e}"))?;
+    let parsed =
+        torrent_from_bytes(torrent_bytes).map_err(|e| format!("invalid .torrent payload: {e}"))?;
     let info = parsed
         .info
         .data
@@ -3406,7 +3426,8 @@ fn payload_files<B: AsRef<[u8]>>(
 /// rather than producing a torrent that can never finish.
 fn selected_indices(preview: &TorrentMetadataPreview) -> Result<Option<Vec<usize>>, String> {
     // Padding files are never written to disk, so they are not part of the decision.
-    let payload: Vec<&TorrentFileItem> = preview.files.iter().filter(|file| !file.padding).collect();
+    let payload: Vec<&TorrentFileItem> =
+        preview.files.iter().filter(|file| !file.padding).collect();
 
     if payload.is_empty() {
         // Magnet whose metadata has not arrived yet: everything will be downloaded.
@@ -3474,7 +3495,6 @@ fn preview_from_info<B: AsRef<[u8]>>(
         raw_bencode_base64,
     }
 }
-
 
 /// Translate a live librqbit handle into the `TorrentItem` model used by the UI.
 fn build_item(
@@ -3655,6 +3675,7 @@ fn build_item(
         piece_count,
         pieces_completed,
         pieces_bitfield,
+        piece_map_exact: false,
         file_progress,
         trackers: extras.trackers.clone(),
         created_at: extras.created_at,
@@ -3758,8 +3779,7 @@ fn status_detail(
                     "Connected to {peers_connected} peer(s) but no data is flowing — they may not have the pieces you need ({seeds_hint}){waiting}"
                 )
             }
-        }
-        // `TorrentStatsState` is exhaustive above, so there is no fallback case.
+        } // `TorrentStatsState` is exhaustive above, so there is no fallback case.
     };
 
     detail
@@ -3804,6 +3824,7 @@ fn purge_item(report: &PurgeReport) -> TorrentItem {
         piece_count: report.files_total,
         pieces_completed: report.files_done,
         pieces_bitfield: coarse_piece_map(report.files_done as u64, report.files_total as u64),
+        piece_map_exact: false,
         file_progress: Vec::new(),
         trackers: Vec::new(),
         created_at: now_ms(),
@@ -3832,20 +3853,51 @@ fn coarse_piece_map(downloaded_bytes: u64, total_bytes: u64) -> Vec<u8> {
     } else {
         (downloaded_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0)
     };
-    let filled = (fraction * COARSE_BUCKETS as f64).floor() as usize;
+    let progressed = fraction * COARSE_BUCKETS as f64;
+    let filled = progressed.floor() as usize;
+    let partial = usize::from(filled < COARSE_BUCKETS && progressed.fract() > 0.0);
 
     (0..COARSE_BUCKETS)
-        .map(|bucket| u8::from(bucket < filled))
+        .map(|bucket| {
+            if bucket < filled {
+                1
+            } else if bucket == filled && partial == 1 {
+                2
+            } else {
+                0
+            }
+        })
         .collect()
 }
 
+/// Reduce an exact piece bitfield to a fixed-size map. Each cell is 1 when all of its
+/// pieces are verified, 2 when it contains a mix, and 0 when none are verified.
+fn piece_map_from_haves(
+    piece_count: usize,
+    mut have: impl FnMut(usize) -> bool,
+) -> (Vec<u8>, usize) {
+    let mut map = vec![0; COARSE_BUCKETS];
+    if piece_count == 0 {
+        return (map, 0);
+    }
 
-
-
-
-
-
-
+    let pieces: Vec<bool> = (0..piece_count).map(&mut have).collect();
+    let completed = pieces.iter().filter(|present| **present).count();
+    let active_buckets = piece_count.min(COARSE_BUCKETS);
+    for (bucket, state) in map.iter_mut().take(active_buckets).enumerate() {
+        let start = bucket * piece_count / active_buckets;
+        let end = (bucket + 1) * piece_count / active_buckets;
+        let present = pieces[start..end].iter().filter(|piece| **piece).count();
+        *state = if present == 0 {
+            0
+        } else if present == end - start {
+            1
+        } else {
+            2
+        };
+    }
+    (map, completed)
+}
 
 // ---------------------------------------------------------------------
 // Tests
@@ -3890,7 +3942,10 @@ mod tests {
         // The result has to be exactly one ordinary component: never `.`, never `..`, never a
         // prefix, so joining it onto the download folder cannot leave that folder.
         let mut components = Path::new(&hostile).components();
-        assert!(matches!(components.next(), Some(Component::Normal(_))), "got {hostile}");
+        assert!(
+            matches!(components.next(), Some(Component::Normal(_))),
+            "got {hostile}"
+        );
         assert!(components.next().is_none(), "got {hostile}");
 
         let base = Path::new("C:/Downloads/MakeMake");
@@ -3972,7 +4027,9 @@ mod tests {
     /// `{ info: { length: 5, name: "test.txt", piece length: 16384, pieces: <20 bytes> } }`
     fn sample_torrent_bencode() -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"d4:infod6:lengthi5e4:name8:test.txt12:piece lengthi16384e6:pieces20:");
+        bytes.extend_from_slice(
+            b"d4:infod6:lengthi5e4:name8:test.txt12:piece lengthi16384e6:pieces20:",
+        );
         bytes.extend_from_slice(&[b'A'; 20]);
         bytes.extend_from_slice(b"ee");
         bytes
@@ -4035,7 +4092,8 @@ mod tests {
     /// front-end model, then locate and remove it again.
     #[tokio::test]
     async fn maps_a_real_session_torrent_into_an_item() {
-        let root = std::env::temp_dir().join(format!("makemake-engine-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("makemake-engine-test-{}", std::process::id()));
         let output = root.join("out");
         fs::create_dir_all(&output).unwrap();
 
@@ -4077,7 +4135,10 @@ mod tests {
             fill_trackers(&handle, &mut extras),
             "the announce URL should be captured from the resolved metadata"
         );
-        assert_eq!(extras.trackers, vec!["udp://tracker.test:1337/xx".to_string()]);
+        assert_eq!(
+            extras.trackers,
+            vec!["udp://tracker.test:1337/xx".to_string()]
+        );
         assert!(
             !fill_trackers(&handle, &mut extras),
             "tracker extraction must be idempotent once cached"
@@ -4182,7 +4243,8 @@ mod tests {
     async fn disk_usage_reports_a_sparse_payload() {
         const LENGTH: u64 = 8 * 1024 * 1024;
 
-        let root = std::env::temp_dir().join(format!("makemake-usage-engine-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("makemake-usage-engine-{}", std::process::id()));
         let output = root.join("out");
         fs::remove_dir_all(&root).ok();
         fs::create_dir_all(&output).unwrap();
@@ -4239,7 +4301,10 @@ mod tests {
         }
 
         assert_eq!(usage.files, 1, "the payload file exists on disk");
-        assert_eq!(usage.logical_bytes, LENGTH, "the declared size must be reported");
+        assert_eq!(
+            usage.logical_bytes, LENGTH,
+            "the declared size must be reported"
+        );
         assert!(
             usage.allocated_bytes < 1024 * 1024,
             "a sparse payload must not be allocated densely, got {} bytes",
@@ -4273,17 +4338,17 @@ mod tests {
         let all = payload_files(&info, None);
         assert_eq!(
             all,
-            vec![
-                (PathBuf::from("a.txt"), 5),
-                (PathBuf::from("c.txt"), 9)
-            ],
+            vec![(PathBuf::from("a.txt"), 5), (PathBuf::from("c.txt"), 9)],
             "padding must never be created on disk"
         );
 
         // Selecting only the padding file leaves nothing to pre-create.
         assert!(payload_files(&info, Some(&[1])).is_empty());
 
-        assert_eq!(payload_files(&info, Some(&[2])), vec![(PathBuf::from("c.txt"), 9)]);
+        assert_eq!(
+            payload_files(&info, Some(&[2])),
+            vec![(PathBuf::from("c.txt"), 9)]
+        );
     }
 
     /// End-to-end: the folder handed to librqbit is the folder the payload lands in, and
@@ -4408,10 +4473,28 @@ mod tests {
 
         let half = coarse_piece_map(50, 100);
         assert_eq!(half.len(), COARSE_BUCKETS);
-        assert_eq!(half.iter().filter(|bit| **bit == 1).count(), COARSE_BUCKETS / 2);
+        assert_eq!(
+            half.iter().filter(|bit| **bit == 1).count(),
+            COARSE_BUCKETS / 2
+        );
 
         assert!(coarse_piece_map(100, 100).iter().all(|bit| *bit == 1));
-        assert!(coarse_piece_map(10, 100).len() < 1000, "must not scale with piece count");
+        assert!(
+            coarse_piece_map(10, 100).len() < 1000,
+            "must not scale with piece count"
+        );
+    }
+
+    #[test]
+    fn exact_piece_map_groups_verified_and_mixed_ranges_without_duplication() {
+        let (small_map, small_complete) = piece_map_from_haves(8, |index| index < 4);
+        assert_eq!(small_complete, 4);
+        assert_eq!(&small_map[..8], &[1, 1, 1, 1, 0, 0, 0, 0]);
+        assert!(small_map[8..].iter().all(|state| *state == 0));
+
+        let (mixed_map, mixed_complete) = piece_map_from_haves(128, |index| index % 2 == 0);
+        assert_eq!(mixed_complete, 64);
+        assert!(mixed_map.iter().all(|state| *state == 2));
     }
 
     #[test]
@@ -4435,7 +4518,10 @@ mod tests {
         assert_eq!(item.status, "Resolving");
         assert!(item.resolving);
         assert_eq!(item.id, queued.info_hash);
-        assert!(item.name.starts_with("Magnet "), "missing name gets a placeholder");
+        assert!(
+            item.name.starts_with("Magnet "),
+            "missing name gets a placeholder"
+        );
         assert_eq!(item.pieces_bitfield.len(), COARSE_BUCKETS);
 
         queued.error = Some("no metadata after 180s".to_string());
@@ -4479,7 +4565,10 @@ mod tests {
         for entry in preview.files.iter_mut() {
             entry.selected = false;
         }
-        assert!(selected_indices(&preview).is_err(), "empty selection is rejected");
+        assert!(
+            selected_indices(&preview).is_err(),
+            "empty selection is rejected"
+        );
 
         // A magnet whose metadata has not arrived downloads everything.
         preview.files.clear();
@@ -4543,7 +4632,11 @@ mod tests {
         bytes.extend_from_slice(b"d4:infod6:lengthi");
         bytes.extend_from_slice(length.to_string().as_bytes());
         bytes.extend_from_slice(
-            format!("e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).as_bytes(),
+            format!(
+                "e4:name{}:{name}12:piece lengthi16384e6:pieces20:",
+                name.len()
+            )
+            .as_bytes(),
         );
         bytes.extend_from_slice(piece_hash);
         bytes.extend_from_slice(b"ee");
@@ -4615,7 +4708,10 @@ mod tests {
             PAYLOAD.len() as u64,
             "the piece already on disk must be adopted, not downloaded again"
         );
-        assert!(stats.finished, "a fully present payload verifies as complete");
+        assert!(
+            stats.finished,
+            "a fully present payload verifies as complete"
+        );
         assert_eq!(
             fs::read(&payload).unwrap(),
             PAYLOAD,
@@ -4763,7 +4859,10 @@ mod tests {
         fs::remove_dir_all(&root).ok();
 
         let engine = TorrentEngine::with_state_dir(root.clone());
-        assert!(!engine.crashed_last_run(), "a first run has nothing to recover");
+        assert!(
+            !engine.crashed_last_run(),
+            "a first run has nothing to recover"
+        );
         assert!(
             root.join(CRASH_MARKER_NAME).is_file(),
             "the marker must be armed while the app runs"
@@ -4949,7 +5048,10 @@ mod tests {
             .expect("manifest should be served on demand");
         assert_eq!(payload.files.len(), 1);
         assert_eq!(payload.files[0].name, "data.bin");
-        assert!(payload.files[0].selected, "no selection means everything is wanted");
+        assert!(
+            payload.files[0].selected,
+            "no selection means everything is wanted"
+        );
 
         fs::remove_dir_all(&root).ok();
     }
@@ -4958,7 +5060,8 @@ mod tests {
     async fn purging_a_torrent_erases_the_payload_and_reports_it() {
         const LENGTH: u64 = 16;
 
-        let root = std::env::temp_dir().join(format!("makemake-purge-engine-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("makemake-purge-engine-{}", std::process::id()));
         let output = root.join("out");
         fs::remove_dir_all(&root).ok();
         fs::create_dir_all(&output).unwrap();

@@ -8,21 +8,21 @@ export default {
     extend: {
       colors: {
         obsidian: {
-          950: '#05070a',
-          900: '#090d14',
-          850: '#0d131d',
-          800: '#141c2b',
-          700: '#1c2638',
-          600: '#28354c',
+          950: 'rgb(var(--obsidian-950) / <alpha-value>)',
+          900: 'rgb(var(--obsidian-900) / <alpha-value>)',
+          850: 'rgb(var(--obsidian-850) / <alpha-value>)',
+          800: 'rgb(var(--obsidian-800) / <alpha-value>)',
+          700: 'rgb(var(--obsidian-700) / <alpha-value>)',
+          600: 'rgb(var(--obsidian-600) / <alpha-value>)',
         },
         cyber: {
-          cyan: '#00f0ff',
-          teal: '#00c8b3',
-          red: '#ff2a6d',
-          vermilion: '#ff4438',
-          gold: '#ffd000',
-          amber: '#e5b869',
-          green: '#10ffa0',
+          cyan: 'rgb(var(--cyber-cyan) / <alpha-value>)',
+          teal: 'rgb(var(--cyber-teal) / <alpha-value>)',
+          red: 'rgb(var(--cyber-red) / <alpha-value>)',
+          vermilion: 'rgb(var(--cyber-vermilion) / <alpha-value>)',
+          gold: 'rgb(var(--cyber-gold) / <alpha-value>)',
+          amber: 'rgb(var(--cyber-amber) / <alpha-value>)',
+          green: 'rgb(var(--cyber-green) / <alpha-value>)',
         },
         basalt: {
           light: '#3a4454',
@@ -35,9 +35,9 @@ export default {
         cyber: ['Orbitron', 'Rajdhani', 'system-ui', 'sans-serif'],
       },
       boxShadow: {
-        'glow-cyan': '0 0 15px rgba(0, 240, 255, 0.4), 0 0 30px rgba(0, 240, 255, 0.2)',
-        'glow-red': '0 0 15px rgba(255, 42, 109, 0.5), 0 0 30px rgba(255, 42, 109, 0.2)',
-        'glow-gold': '0 0 15px rgba(255, 208, 0, 0.4), 0 0 30px rgba(255, 208, 0, 0.2)',
+        'glow-cyan': '0 0 15px rgb(var(--cyber-cyan) / 0.4), 0 0 30px rgb(var(--cyber-cyan) / 0.2)',
+        'glow-red': '0 0 15px rgb(var(--cyber-red) / 0.5), 0 0 30px rgb(var(--cyber-red) / 0.2)',
+        'glow-gold': '0 0 15px rgb(var(--cyber-gold) / 0.4), 0 0 30px rgb(var(--cyber-gold) / 0.2)',
         'obsidian-inner': 'inset 0 1px 3px rgba(255,255,255,0.05), inset 0 -2px 6px rgba(0,0,0,0.8)',
       },
       animation: {

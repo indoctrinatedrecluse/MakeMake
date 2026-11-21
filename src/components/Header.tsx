@@ -1,4 +1,5 @@
 import React from 'react';
+import appPackage from '../../package.json';
 import { MakeMakeIcon } from './gizmos/MakeMakeIcon';
 import { CalderaDials } from './gizmos/CalderaDials';
 import {
@@ -10,6 +11,7 @@ import {
   Share2,
   PauseCircle,
   PlayCircle,
+  Download,
 } from 'lucide-react';
 import { SystemStats } from '../types/torrent';
 
@@ -21,6 +23,10 @@ interface HeaderProps {
   onPauseAll?: () => void;
   onResumeAll?: () => void;
   torrentCount?: number;
+  onCheckUpdates?: () => void;
+  updateAvailable?: boolean;
+  isCheckingUpdate?: boolean;
+  updaterEnabled?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -31,14 +37,20 @@ export const Header: React.FC<HeaderProps> = ({
   onPauseAll,
   onResumeAll,
   torrentCount = 0,
+  onCheckUpdates,
+  updateAvailable = false,
+  isCheckingUpdate = false,
+  updaterEnabled = true,
 }) => {
   return (
     <header className="h-16 px-5 border-b border-cyber-cyan/20 bg-obsidian-950/90 backdrop-blur-md flex items-center justify-between select-none z-30">
       {/* Brand & Theme Identity */}
       <div className="flex items-center space-x-3.5">
-        <div
+        <button
+          type="button"
           onClick={onShowSplash}
-          className="cursor-pointer group flex items-center space-x-2.5 transition-transform hover:scale-105"
+          aria-label="Show MakeMake introduction"
+          className="cursor-pointer group flex items-center space-x-2.5 transition-transform hover:scale-105 text-left"
           title="Click to view Animated Moai Splash Portal"
         >
           <MakeMakeIcon size={34} color="cyan" glow />
@@ -48,19 +60,19 @@ export const Header: React.FC<HeaderProps> = ({
                 MAKEMAKE
               </span>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyber-red/20 text-cyber-red border border-cyber-red/40 font-bold">
-                v0.1.4
+                v{appPackage.version}
               </span>
             </div>
             <div className="text-[9px] font-mono text-slate-400 tracking-wider">
               RAPA NUI SWARM ENGINE // AHU-ONLINE
             </div>
           </div>
-        </div>
+        </button>
 
         <div className="h-7 w-[1px] bg-slate-800 hidden md:block" />
 
         {/* Live Swarm Telemetry Badges */}
-        <div className="hidden lg:flex items-center space-x-3 text-xs font-mono">
+        <div className="hidden xl:flex items-center space-x-3 text-xs font-mono">
           <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-obsidian-900 border border-slate-800">
             <Radio className="w-3.5 h-3.5 text-cyber-cyan animate-pulse" />
             <span className="text-slate-400 text-[10px]">DHT NODES:</span>
@@ -92,6 +104,7 @@ export const Header: React.FC<HeaderProps> = ({
             disabled={torrentCount === 0}
             className="p-1.5 rounded text-slate-400 hover:text-cyber-red hover:bg-slate-800 disabled:opacity-30 transition-colors"
             title="Pause all torrents"
+            aria-label="Pause all torrents"
           >
             <PauseCircle className="w-4 h-4" />
           </button>
@@ -100,6 +113,7 @@ export const Header: React.FC<HeaderProps> = ({
             disabled={torrentCount === 0}
             className="p-1.5 rounded text-slate-400 hover:text-cyber-green hover:bg-slate-800 disabled:opacity-30 transition-colors"
             title="Resume all torrents"
+            aria-label="Resume all torrents"
           >
             <PlayCircle className="w-4 h-4" />
           </button>
@@ -110,6 +124,7 @@ export const Header: React.FC<HeaderProps> = ({
           onClick={() => onOpenAddModal()}
           className="px-3 py-1.5 rounded bg-obsidian-900 border border-cyber-cyan/30 text-cyber-cyan hover:bg-cyber-cyan/20 text-xs font-mono flex items-center space-x-1.5 transition-all shadow-glow-cyan/20"
           title="Add a magnet link"
+          aria-label="Add a magnet link"
         >
           <Link className="w-3.5 h-3.5" />
           <span className="hidden sm:inline">Magnet</span>
@@ -126,11 +141,26 @@ export const Header: React.FC<HeaderProps> = ({
 
         <div className="h-6 w-[1px] bg-slate-800" />
 
+        {updaterEnabled && (
+          <button
+            type="button"
+            onClick={onCheckUpdates}
+            disabled={isCheckingUpdate}
+            className={`relative p-2 rounded bg-obsidian-900 border text-slate-400 hover:text-cyber-cyan hover:border-cyber-cyan/50 transition-colors disabled:opacity-50 ${updateAvailable ? 'border-cyber-gold/70 text-cyber-gold' : 'border-slate-800'}`}
+            title={updateAvailable ? 'A signed update is ready to install' : 'Check for MakeMake updates'}
+            aria-label={updateAvailable ? 'Open available update' : 'Check for MakeMake updates'}
+          >
+            <Download className={`w-4 h-4 ${isCheckingUpdate ? 'animate-pulse' : ''}`} />
+            {updateAvailable && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-cyber-gold" />}
+          </button>
+        )}
+
         {/* Replay Splash / Lore */}
         <button
           onClick={onShowSplash}
           className="p-2 rounded bg-obsidian-900 border border-slate-800 text-slate-400 hover:text-cyber-cyan hover:border-cyber-cyan/50 transition-colors"
           title="Replay Moai Splash Scene"
+          aria-label="Replay introduction"
         >
           <Sparkles className="w-4 h-4 text-cyber-gold" />
         </button>
@@ -140,6 +170,7 @@ export const Header: React.FC<HeaderProps> = ({
           onClick={onOpenSettings}
           className="p-2 rounded bg-obsidian-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition-colors"
           title="MakeMake Vault & Settings"
+          aria-label="Open settings"
         >
           <SettingsIcon className="w-4 h-4" />
         </button>

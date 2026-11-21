@@ -6,7 +6,9 @@ interface CyberProgressBarProps {
   showSegments?: boolean;
   segmentsCount?: number;
   glowColor?: 'cyan' | 'green' | 'red' | 'gold';
+  /** Coarse buckets from real haves, or a byte-progress estimate while initializing. */
   piecesBitfield?: number[];
+  pieceMapExact?: boolean;
   className?: string;
 }
 
@@ -17,6 +19,7 @@ export const CyberProgressBar: React.FC<CyberProgressBarProps> = ({
   segmentsCount = 20,
   glowColor = 'cyan',
   piecesBitfield,
+  pieceMapExact = false,
   className = '',
 }) => {
   const clampedProgress = Math.max(0, Math.min(100, progress));
@@ -24,26 +27,26 @@ export const CyberProgressBar: React.FC<CyberProgressBarProps> = ({
   const getGradient = () => {
     switch (glowColor) {
       case 'green':
-        return 'from-cyber-teal via-cyber-green to-emerald-400';
+        return 'from-cyber-teal via-cyber-green to-cyber-green';
       case 'red':
-        return 'from-cyber-red via-cyber-vermilion to-rose-400';
+        return 'from-cyber-red via-cyber-vermilion to-cyber-red';
       case 'gold':
-        return 'from-cyber-amber via-cyber-gold to-yellow-300';
+        return 'from-cyber-amber via-cyber-gold to-cyber-gold';
       default:
-        return 'from-blue-600 via-cyber-cyan to-cyber-teal';
+        return 'from-cyber-cyan via-cyber-cyan to-cyber-teal';
     }
   };
 
   const getGlow = () => {
     switch (glowColor) {
       case 'green':
-        return 'rgba(16, 255, 160, 0.6)';
+        return 'rgb(var(--cyber-green) / 0.6)';
       case 'red':
-        return 'rgba(255, 42, 109, 0.6)';
+        return 'rgb(var(--cyber-red) / 0.6)';
       case 'gold':
-        return 'rgba(255, 208, 0, 0.6)';
+        return 'rgb(var(--cyber-gold) / 0.6)';
       default:
-        return 'rgba(0, 240, 255, 0.6)';
+        return 'rgb(var(--cyber-cyan) / 0.6)';
     }
   };
 
@@ -73,12 +76,11 @@ export const CyberProgressBar: React.FC<CyberProgressBarProps> = ({
         >
           {/* Animated Laser Pulse Shimmer passing left to right */}
           <div
-            className="absolute inset-0 w-full h-full opacity-60 pointer-events-none"
+            className="absolute inset-0 w-full h-full opacity-60 pointer-events-none anim-laser-scan"
             style={{
               background:
                 'linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.7) 50%, transparent 100%)',
               backgroundSize: '200% 100%',
-              animation: 'laserScan 2.2s linear infinite',
             }}
           />
         </div>
@@ -105,21 +107,28 @@ export const CyberProgressBar: React.FC<CyberProgressBarProps> = ({
         )}
       </div>
 
-      {/* Optional Integrated Mini Piece Heatmap */}
       {piecesBitfield && piecesBitfield.length > 0 && (
-        <div className="flex w-full h-1 gap-[1px] bg-black/50 rounded overflow-hidden">
-          {piecesBitfield.slice(0, 64).map((bit, i) => (
+        <div
+          className="flex w-full h-1 gap-[1px] bg-black/50 rounded overflow-hidden"
+          role="img"
+          aria-label={pieceMapExact ? 'Coarse map of verified piece ranges' : 'Estimated byte progress map'}
+          title={pieceMapExact ? 'Coarse map sampled from verified pieces' : 'Estimated from verified byte progress while piece data is unavailable'}
+        >
+          {piecesBitfield.slice(0, 64).map((state, index) => (
             <div
-              key={i}
+              key={index}
               className={`flex-1 h-full transition-colors ${
-                bit === 1
-                  ? 'bg-cyber-cyan shadow-[0_0_3px_#00f0ff]'
-                  : 'bg-slate-900'
+                state === 1
+                  ? 'bg-cyber-cyan shadow-glow-cyan'
+                  : state === 2
+                    ? 'bg-cyber-vermilion'
+                    : 'bg-slate-900'
               }`}
             />
           ))}
         </div>
       )}
+
     </div>
   );
 };

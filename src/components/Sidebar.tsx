@@ -47,7 +47,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   return (
-    <aside className="w-80 border-r border-slate-800/80 bg-obsidian-950 flex flex-col justify-between p-3 select-none overflow-y-auto">
+    <aside className="w-80 shrink-0 border-r border-slate-800/80 bg-obsidian-950 flex flex-col justify-between p-3 select-none overflow-y-auto">
       {/* Top Filter Navigation */}
       <div className="space-y-4">
         <div>

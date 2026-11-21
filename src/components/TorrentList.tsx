@@ -100,7 +100,7 @@ export const TorrentList: React.FC<TorrentListProps> = ({
   }, [filteredTorrents, sortField, sortAsc]);
 
   return (
-    <main className="flex-1 flex flex-col h-full bg-obsidian-950 overflow-hidden">
+    <main className="min-w-0 flex-1 flex flex-col h-full bg-obsidian-950 overflow-hidden">
       {/* Sub-header Toolbar with Sort & Search */}
       <div className="h-12 px-4 border-b border-slate-800/80 bg-obsidian-900/40 flex items-center justify-between gap-4">
         <div className="flex items-center space-x-3 text-xs font-mono text-slate-400">
@@ -121,7 +121,7 @@ export const TorrentList: React.FC<TorrentListProps> = ({
 
         {/* Quick Sort Pills & Search */}
         <div className="flex items-center space-x-3">
-          <div className="hidden lg:flex items-center space-x-1.5 text-[10px] font-mono text-slate-400">
+          <div className="hidden xl:flex items-center space-x-1.5 text-[10px] font-mono text-slate-400">
             <span>SORT:</span>
             {(['progress', 'dlSpeed', 'size', 'name'] as SortField[]).map((f) => (
               <button
@@ -156,17 +156,17 @@ export const TorrentList: React.FC<TorrentListProps> = ({
       <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
         {sortedTorrents.length > 0 ? (
           viewMode === 'table' ? (
-            <div className="rounded border border-slate-800 overflow-hidden">
-              <table className="w-full text-left divide-y divide-slate-800">
+            <div className="rounded border border-slate-800 overflow-x-auto">
+              <table className="w-full min-w-[980px] text-left divide-y divide-slate-800">
                 <thead className="bg-obsidian-900 text-slate-400 font-mono text-[10px] font-bold">
                   <tr>
-                    <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('name')}>NAME</th>
+                    <th scope="col" className="px-3 py-2"><button type="button" onClick={() => handleSort('name')}>NAME</button></th>
                     <th className="px-3 py-2">STATUS</th>
-                    <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('progress')}>PROGRESS</th>
-                    <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('size')}>SIZE</th>
-                    <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('dlSpeed')}>DL SPEED</th>
-                    <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('ulSpeed')}>UL SPEED</th>
-                    <th className="px-3 py-2 cursor-pointer hover:text-white" onClick={() => handleSort('eta')}>ETA</th>
+                    <th scope="col" className="px-3 py-2"><button type="button" onClick={() => handleSort('progress')}>PROGRESS</button></th>
+                    <th scope="col" className="px-3 py-2"><button type="button" onClick={() => handleSort('size')}>SIZE</button></th>
+                    <th scope="col" className="px-3 py-2"><button type="button" onClick={() => handleSort('dlSpeed')}>DL SPEED</button></th>
+                    <th scope="col" className="px-3 py-2"><button type="button" onClick={() => handleSort('ulSpeed')}>UL SPEED</button></th>
+                    <th scope="col" className="px-3 py-2"><button type="button" onClick={() => handleSort('eta')}>ETA</button></th>
                     <th className="px-3 py-2" title="Seeds / leechers in the swarm (tracker scrape)">SEEDS/LEECH</th>
                     <th className="px-3 py-2" title="Peers connected / known to this client">PEERS</th>
                   </tr>

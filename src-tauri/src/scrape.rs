@@ -90,7 +90,6 @@ pub async fn scrape(info_hash: &str, trackers: &[String]) -> SwarmCounts {
     counts
 }
 
-
 // ---------------------------------------------------------------------
 // HTTP(S)
 // ---------------------------------------------------------------------
@@ -183,7 +182,6 @@ fn percent_encode(bytes: &[u8]) -> String {
     }
     encoded
 }
-
 
 // ---------------------------------------------------------------------
 // UDP (BEP-15)
@@ -294,7 +292,6 @@ fn next_transaction_id() -> u32 {
         .unwrap_or(0);
     sequence ^ clock
 }
-
 
 // ---------------------------------------------------------------------
 // Bencode (only what a scrape response needs)
@@ -501,7 +498,10 @@ mod tests {
         assert_eq!(&connect[12..], &0xdead_beefu32.to_be_bytes());
 
         let scrape_request = scrape_packet(0x1122_3344_5566_7788, 7, &HASH);
-        assert_eq!(&scrape_request[..8], &0x1122_3344_5566_7788u64.to_be_bytes());
+        assert_eq!(
+            &scrape_request[..8],
+            &0x1122_3344_5566_7788u64.to_be_bytes()
+        );
         assert_eq!(&scrape_request[8..12], &ACTION_SCRAPE.to_be_bytes());
         assert_eq!(&scrape_request[12..16], &7u32.to_be_bytes());
         assert_eq!(&scrape_request[16..], &HASH);
@@ -550,11 +550,7 @@ mod tests {
     #[tokio::test]
     async fn unreachable_trackers_report_nothing_instead_of_failing() {
         // Port 9 is the discard port: nothing answers, and a closed local port errors out fast.
-        let counts = scrape(
-            HASH_HEX,
-            &["udp://127.0.0.1:9/announce".to_string()],
-        )
-        .await;
+        let counts = scrape(HASH_HEX, &["udp://127.0.0.1:9/announce".to_string()]).await;
         assert_eq!(counts, SwarmCounts::default());
     }
 }

@@ -4,7 +4,7 @@
 ```
                      .---.
                     /     \
-                   | () () |       MAKEMAKE PROTOCOL v0.1.7
+                   | () () |       MAKEMAKE PROTOCOL v0.2.0
                     \  ^  /        [SYSTEM: AHU-ONLINE]
                      |||||         [SWARM: TANGATA-MANU ACTIVE]
                     /=====\
@@ -155,7 +155,7 @@ Every spring on the jagged volcanic cliffs of *Rano Kau*, competitors (*hopu man
   info hash, the radius is the verified completion of that swarm (rim = 0 %, core = 100 %), and the
   colour is its live engine state (leech / seed / paused / error). Hover a blip for its name,
   progress and status; the footer carries live down/up rates plus peer and DHT counts.
-* **Ahu Block Matrix**: Visual piece picker and block allocation map styled as an obsidian stone mosaic.
+* **Ahu Block Matrix**: Compact map of verified piece ranges when the engine exposes its bitfield. During initialization, it keeps the visual and labels the byte-progress estimate; it does not select pieces.
 * **Caldera Fluid Gauges**: Circular fluid vector dials displaying download/upload bandwidth and disk cache saturation.
 * **Rongorongo Decryptor**: Live event stream rendering real engine state changes (adds, pauses, checks, completions).
 
@@ -181,7 +181,7 @@ Use this exact prompt in **Google Veo / Imagen 3 Video / VideoFX** to generate t
 > **Prompt:**  
 > *"Cinematic 4K hypermodern cyberpunk reimagining of Easter Island (Rapa Nui). Massive monolithic Moai statues carved from reflective black volcanic obsidian and weathered basalt, towering over the crater cliffs of Rano Kau at midnight. Glowing neon cyan and ceremonial crimson laser circuitry veins pulse intricately across the statues' faces and chests. A stormy cybernetic Pacific ocean crashes below with bioluminescent electric teal waves. Holographic Polynesian star navigation charts, glowing cyber-petroglyphs, and floating geometric runes hover in the misty air around the statues. Volumetric fog, dark moody cyberpunk atmosphere, blade runner lighting, cinematic anamorphic lens flares, ultra-detailed 8k render, photorealistic, 60fps."*
 
-*To install a custom video in MakeMake, simply place your generated `splash-moai.mp4` into the `public/` directory! MakeMake automatically falls back to an interactive real-time Canvas/CSS 3D cyber-Moai engine if no video is present.*
+*To install a custom video in MakeMake, place your generated `splash-moai.mp4` into the `public/` directory. If neither splash video can load, MakeMake shows its animated Canvas2D cyber-Moai scene.*
 
 ---
 
@@ -190,7 +190,7 @@ Use this exact prompt in **Google Veo / Imagen 3 Video / VideoFX** to generate t
 * **Shell**: [Tauri v2](https://v2.tauri.app/) (Rust backend for memory safety, low resource footprint, and native OS interop)
 * **Frontend**: React 19, TypeScript, Vite
 * **Styling**: Tailwind CSS + Custom CSS Cyber Shaders
-* **3D & Visualizations**: Three.js / React Three Fiber, Canvas2D procedural particle engines
+* **Visualizations**: Canvas2D telemetry and particle renderers, plus CSS animation layers
 * **Icons**: Custom SVG Rapa Nui & Cyberpunk Iconography + Lucide Icons
 * **Torrent Core**: High-speed Rust BitTorrent coordinator (librqbit) with DHT metadata
   resolution, SHA-1 piece verification, automated disk persistence, and **sparse payload

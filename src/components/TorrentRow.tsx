@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { TorrentItem } from '../types/torrent';
 import { CyberProgressBar } from './gizmos/CyberProgressBar';
+import { formatBytes, formatSpeed } from '../utils/format';
 import { WorkBand, deriveHiddenWork } from './gizmos/WorkBand';
 import { WorkGlyph } from './gizmos/WorkGlyph';
 import { cyberAudio } from '../utils/cyberAudio';
@@ -74,21 +75,6 @@ const TorrentRowBase: React.FC<TorrentRowProps> = ({
   onStart,
   onPause,
 }) => {
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-  };
-
-  const formatSpeed = (bytesPerSec: number) => {
-    if (bytesPerSec === 0) return '0 B/s';
-    if (bytesPerSec < 1024) return `${bytesPerSec} B/s`;
-    if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
-    return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
-  };
-
   const formatEta = (seconds: number | null) => {
     if (seconds === null || seconds === undefined) return '∞';
     if (seconds === 0) return 'Done';
@@ -309,6 +295,7 @@ const TorrentRowBase: React.FC<TorrentRowProps> = ({
           height={8}
           glowColor={torrent.progress >= 100 ? 'green' : 'cyan'}
           piecesBitfield={torrent.piecesBitfield}
+          pieceMapExact={torrent.pieceMapExact}
         />
       </div>
 

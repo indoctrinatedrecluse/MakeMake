@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.2.0] — 2026-11-21
+
+Minor release focused on making the live swarm view more truthful, reducing needless UI work,
+finishing theme behavior, and adding signed in-app updates.
+
+### Added
+- **Signed in-app updater.** MakeMake checks the GitHub release feed once after launch and from the
+  header. Updates show their release notes and download progress; installation only begins after
+  the user chooses “Install & Restart”. Update bundles are signed in CI and verified by the app.
+- **Three complete visual themes.** Theme choice now drives shared CSS variables, including chart
+  canvases and status colors, while preserving the cyberpunk, Rapa Nui visual language.
+- **Real piece availability visualization.** The selected torrent's piece map uses the engine's
+  actual bitfield; other rows retain a clearly identified byte-progress estimate to avoid fetching
+  and serializing full maps for the entire library every poll.
+- **Persistent sound preference, keyboard shortcuts, reduced-motion behavior, and responsive table
+  overflow** for more predictable daily use.
+
+### Changed
+- **Lower-cost live telemetry.** Speed charts sample by elapsed time and redraw at a stable cadence;
+  theme changes update their canvas colors without remounting the charts.
+- Shared byte and speed formatting now uses one utility, and unused frontend dependencies were
+  removed.
+- README and the introduction screen use the package version instead of stale hardcoded strings.
+
+### Fixed
+- Browser fallback controls no longer report success for operations that require the desktop
+  engine, such as opening paths or exporting torrent metadata.
+- The piece heatmap remains visible with its original visual treatment while distinguishing exact
+  engine data from estimates for incomplete rows.
+
 ## [v0.1.7] — 2026-10-30
 
 Correctness release for the three things that made v0.1.6 feel broken: the seed/leech numbers were
@@ -447,6 +477,7 @@ Rust) running a real `librqbit` session — no mocks, no fabricated telemetry.
 - Moving already-downloaded data to a new folder is not implemented yet (re-add with a new target
   folder to re-check in place).
 
-[Unreleased]: https://github.com/indoctrinatedrecluse/MakeMake/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/indoctrinatedrecluse/MakeMake/compare/v0.2.0...HEAD
+[v0.2.0]: https://github.com/indoctrinatedrecluse/MakeMake/compare/v0.1.7...v0.2.0
 [v0.1.7]: https://github.com/indoctrinatedrecluse/MakeMake/compare/v0.1.6...v0.1.7
 [v0.1.6]: https://github.com/indoctrinatedrecluse/MakeMake/releases/tag/v0.1.6

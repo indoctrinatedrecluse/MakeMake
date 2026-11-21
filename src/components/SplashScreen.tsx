@@ -1,45 +1,40 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { MakeMakeIcon } from './gizmos/MakeMakeIcon';
 import { Play, Sparkles } from 'lucide-react';
+import appPackage from '../../package.json';
 
 interface SplashScreenProps {
   onDismiss: () => void;
 }
+
+const BOOT_MESSAGES = [
+  'ALIGNING CELESTIAL POLYNESIAN WAYFINDING RADAR...',
+  'EXCAVATING RANO KAU VOLCANIC OBSIDIAN CORE...',
+  'VERIFYING SHA-1 BITTORRENT PIECE HASH ARRAYS...',
+  'ENGAGING TANGATA-MANU BIRDMAN SWARM PROTOCOL...',
+  'MAKEMAKE CREATOR ENGINE // ONLINE & OPERATIONAL.',
+];
 
 export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
   const [videoError, setVideoError] = useState(false);
   const [bootStep, setBootStep] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Boot sequence lines
-  const bootMessages = [
-    'ALIGNING CELESTIAL POLYNESIAN WAYFINDING RADAR...',
-    'EXCAVATING RANO KAU VOLCANIC OBSIDIAN CORE...',
-    'CALIBRATING SHA-256 AHU MONOLITH HASH ARRAYS...',
-    'ENGAGING TANGATA-MANU BIRDMAN SWARM PROTOCOL...',
-    'MAKEMAKE CREATOR ENGINE // ONLINE & OPERATIONAL.',
-  ];
-
   useEffect(() => {
-    const timer = setInterval(() => {
-      setBootStep((prev) => {
-        if (prev < bootMessages.length - 1) return prev + 1;
-        return prev;
-      });
-    }, 600);
-
-    return () => clearInterval(timer);
-  }, [bootMessages.length]);
+    if (bootStep >= BOOT_MESSAGES.length - 1) return;
+    const timer = window.setTimeout(() => setBootStep((prev) => Math.min(prev + 1, BOOT_MESSAGES.length - 1)), 600);
+    return () => window.clearTimeout(timer);
+  }, [bootStep]);
 
   // Canvas-based animated cyber-Moai scene
   useEffect(() => {
-    if (!videoError && false) return; // Keep canvas always rendering in background
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let animId: number;
+    let animId = 0;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     let time = 0;
 
     // Volcanic ash particles
@@ -50,12 +45,19 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
       speedY: -(Math.random() * 1.2 + 0.4),
       speedX: (Math.random() - 0.5) * 0.5,
       alpha: Math.random() * 0.7 + 0.2,
-      color: Math.random() > 0.4 ? '#00f0ff' : '#ff2a6d',
+      tone: Math.random() > 0.4 ? 'cyan' as const : 'red' as const,
     }));
 
     const render = () => {
       time += 0.03;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const palette = getComputedStyle(canvas);
+      const token = (name: string, fallback: string) =>
+        palette.getPropertyValue(name).trim() || fallback;
+      const cyan = token('--cyber-cyan', '0 240 255');
+      const red = token('--cyber-red', '255 42 109');
+      const dark = token('--obsidian-950', '5 7 10');
+      const surface = token('--obsidian-900', '9 13 20');
 
       const w = canvas.width;
       const h = canvas.height;
@@ -64,14 +66,14 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
 
       // Volcanic dark sky gradient
       const skyGrad = ctx.createLinearGradient(0, 0, 0, h);
-      skyGrad.addColorStop(0, '#04060a');
-      skyGrad.addColorStop(0.6, '#080d16');
-      skyGrad.addColorStop(1, '#020305');
+      skyGrad.addColorStop(0, `rgb(${dark})`);
+      skyGrad.addColorStop(0.6, `rgb(${surface})`);
+      skyGrad.addColorStop(1, `rgb(${dark})`);
       ctx.fillStyle = skyGrad;
       ctx.fillRect(0, 0, w, h);
 
       // Distant Rano Kau Caldera horizon silhouette
-      ctx.fillStyle = '#06090e';
+      ctx.fillStyle = `rgb(${dark})`;
       ctx.beginPath();
       ctx.moveTo(0, h);
       ctx.lineTo(0, h * 0.75);
@@ -82,7 +84,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
       ctx.fill();
 
       // Atmospheric Laser Grid at bottom
-      ctx.strokeStyle = 'rgba(0, 240, 255, 0.12)';
+      ctx.strokeStyle = `rgb(${cyan} / 0.12)`;
       ctx.lineWidth = 1;
       for (let i = 0; i < w; i += 40) {
         ctx.beginPath();
@@ -101,9 +103,10 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
         }
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-        ctx.fillStyle = p.color;
+        const particleColor = p.tone === 'cyan' ? `rgb(${cyan})` : `rgb(${red})`;
+        ctx.fillStyle = particleColor;
         ctx.globalAlpha = p.alpha;
-        ctx.shadowColor = p.color;
+        ctx.shadowColor = particleColor;
         ctx.shadowBlur = 6;
         ctx.fill();
         ctx.shadowBlur = 0;
@@ -112,8 +115,8 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
 
       // Central Cyber Moai Monolith Aura Glow
       const aura = ctx.createRadialGradient(cx, cy, 30, cx, cy, 260);
-      aura.addColorStop(0, 'rgba(0, 240, 255, 0.18)');
-      aura.addColorStop(0.5, 'rgba(255, 42, 109, 0.08)');
+      aura.addColorStop(0, `rgb(${cyan} / 0.18)`);
+      aura.addColorStop(0.5, `rgb(${red} / 0.08)`);
       aura.addColorStop(1, 'rgba(0, 0, 0, 0)');
       ctx.fillStyle = aura;
       ctx.beginPath();
@@ -123,9 +126,9 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
       // Animated Glowing Cybernetic Veins traversing the space
       ctx.save();
       const pulse = Math.sin(time * 2);
-      ctx.strokeStyle = `rgba(0, 240, 255, ${0.4 + pulse * 0.3})`;
+      ctx.strokeStyle = `rgb(${cyan} / ${0.4 + pulse * 0.3})`;
       ctx.lineWidth = 2;
-      ctx.shadowColor = '#00f0ff';
+      ctx.shadowColor = `rgb(${cyan})`;
       ctx.shadowBlur = 15;
 
       // Laser vein line left
@@ -137,8 +140,8 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
       ctx.stroke();
 
       // Laser vein line right
-      ctx.strokeStyle = `rgba(255, 42, 109, ${0.4 - pulse * 0.2})`;
-      ctx.shadowColor = '#ff2a6d';
+      ctx.strokeStyle = `rgb(${red} / ${0.4 - pulse * 0.2})`;
+      ctx.shadowColor = `rgb(${red})`;
       ctx.beginPath();
       ctx.moveTo(cx + 140, cy + 80);
       ctx.lineTo(cx + 90, cy + 40);
@@ -147,7 +150,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
       ctx.stroke();
       ctx.restore();
 
-      animId = requestAnimationFrame(render);
+      if (!reducedMotion) animId = requestAnimationFrame(render);
     };
 
     const handleResize = () => {
@@ -200,7 +203,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
           <MakeMakeIcon size={38} color="cyan" glow />
           <div>
             <div className="text-sm font-bold font-cyber tracking-widest text-cyber-cyan text-cyber-glow-cyan">
-              MAKEMAKE // PROTOCOL 0.1
+              MAKEMAKE // PROTOCOL {appPackage.version}
             </div>
             <div className="text-[10px] font-mono text-slate-400">
               RAPA NUI SWARM ENGINE // AHU MONOLITH SUITE
@@ -210,7 +213,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
 
         <div className="text-right font-mono text-[11px] text-slate-400">
           <div>COORDINATES: <span className="text-cyber-gold font-bold">27°07′S 109°22′W</span></div>
-          <div className="text-cyber-green">TANGATA MANU DAEMON: ACTIVE</div>
+          <div className="text-cyber-green">BITTORRENT CORE: LIBRQBIT</div>
         </div>
       </div>
 
@@ -241,13 +244,15 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onDismiss }) => {
           <div className="flex items-center justify-between pb-1.5 mb-2 border-b border-slate-800 text-slate-400">
             <span className="text-cyber-gold font-bold flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5" />
-              SYSTEM INITIALIZATION PROTOCOL
+              VISUAL INTRO SEQUENCE
             </span>
-            <span className="text-cyber-cyan animate-pulse">BOOTING...</span>
+            <span className="text-cyber-cyan animate-pulse">
+              {bootStep === BOOT_MESSAGES.length - 1 ? 'SCENE READY' : 'INTRO RUNNING'}
+            </span>
           </div>
 
           <div className="space-y-1">
-            {bootMessages.map((msg, idx) => (
+            {BOOT_MESSAGES.map((msg, idx) => (
               <div
                 key={idx}
                 className={`transition-all duration-300 ${

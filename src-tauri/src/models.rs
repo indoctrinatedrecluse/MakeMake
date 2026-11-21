@@ -112,6 +112,9 @@ pub struct TorrentItem {
     pub piece_count: usize,
     pub pieces_completed: usize,
     pub pieces_bitfield: Vec<u8>,
+    /// True when the compact map came from librqbit's verified-piece bitfield.
+    #[serde(default)]
+    pub piece_map_exact: bool,
     /// Per-file downloaded byte counts, in `files` order (straight from librqbit).
     pub file_progress: Vec<u64>,
     /// Announce URLs declared by the torrent metadata.

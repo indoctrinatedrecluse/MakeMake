@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'lucide-react';
 import { SystemStats, TorrentItem } from '../../types/torrent';
+import { formatBytes } from '../../utils/format';
 
 const GLYPH = {
   session: '◈',
@@ -8,14 +9,6 @@ const GLYPH = {
   status: '▲',
   complete: '⚡',
 } as const;
-
-const formatBytes = (bytes: number) => {
-  if (!bytes || bytes <= 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-};
 
 const stamp = () => new Date().toLocaleTimeString();
 

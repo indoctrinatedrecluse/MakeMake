@@ -100,7 +100,10 @@ export interface TorrentItem {
   files: TorrentFileItem[];
   pieceCount: number;
   piecesCompleted: number;
-  piecesBitfield: number[]; // sampled or compressed bitfield (0 = missing, 1 = downloaded)
+  /** 64 coarse piece buckets: 0 missing, 1 complete, 2 mixed or estimated in flight. */
+  piecesBitfield: number[];
+  /** True when buckets were sampled from librqbit's actual verified-piece bitfield. */
+  pieceMapExact?: boolean;
   fileProgress?: number[]; // per-file downloaded bytes, aligned with `files`
   trackers?: string[]; // announce URLs declared by the torrent metadata
   createdAt: number;

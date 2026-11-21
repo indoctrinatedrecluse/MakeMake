@@ -4,5 +4,5 @@
 #![cfg_attr(not(feature = "console"), windows_subsystem = "windows")]
 
 fn main() {
-  makemake_lib::run();
+    makemake_lib::run();
 }

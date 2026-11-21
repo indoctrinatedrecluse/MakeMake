@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { TorrentItem, SystemStats } from '../../types/torrent';
+import { formatSpeed } from '../../utils/format';
 
 /**
  * One plotted swarm. The radius encodes completion (rim = 0 %, core = 100 %) and the
@@ -41,18 +42,6 @@ const hashToAngle = (seed: string): number => {
     hash = Math.imul(hash, 16777619) >>> 0;
   }
   return ((hash % 4096) / 4096) * Math.PI * 2;
-};
-
-const formatSpeed = (bytesPerSecond: number): string => {
-  if (!bytesPerSecond) return '0 B/s';
-  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-  let value = bytesPerSecond;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(value >= 100 || unit === 0 ? 0 : 1)} ${units[unit]}`;
 };
 
 export const SwarmAstrolabe: React.FC<{
@@ -110,15 +99,30 @@ export const SwarmAstrolabe: React.FC<{
 
     let animationFrameId = 0;
     let sweep = 0;
+    let reducedMotionTimer: number | undefined;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     const render = () => {
-      sweep += 0.012;
+      if (!reducedMotion) sweep += 0.012;
       const width = canvas.width;
       const height = canvas.height;
       const cx = width / 2;
       const cy = height / 2;
       const maxRadius = Math.min(cx, cy) - 20;
       const blips = dataRef.current.blips;
+      const palette = getComputedStyle(canvas);
+      const color = (token: string, fallback: string) => {
+        const value = palette.getPropertyValue(token).trim();
+        return value ? `rgb(${value})` : fallback;
+      };
+      const themedColours: Record<string, string> = {
+        Downloading: color('--cyber-cyan', '#00f0ff'),
+        Seeding: color('--cyber-green', '#10ffa0'),
+        Completed: color('--cyber-green', '#10ffa0'),
+        Checking: color('--cyber-gold', '#ffd000'),
+        Queued: color('--cyber-amber', '#e5b869'),
+        Error: color('--cyber-red', '#ff2a6d'),
+      };
 
       ctx.clearRect(0, 0, width, height);
 
@@ -176,6 +180,7 @@ export const SwarmAstrolabe: React.FC<{
 
       // Swarm blips
       blips.forEach((blip) => {
+        const blipColour = themedColours[blip.status] ?? blip.colour;
         const x = cx + Math.cos(blip.angle) * maxRadius * blip.distance;
         const y = cy + Math.sin(blip.angle) * maxRadius * blip.distance;
         blip.x = x;
@@ -195,8 +200,8 @@ export const SwarmAstrolabe: React.FC<{
         const pulse = 3 + Math.sin(sweep * (blip.speed > 0 ? 6 : 2) + blip.angle) * 1.6;
         ctx.beginPath();
         ctx.arc(x, y, pulse + (blip.selected ? 2.5 : 0), 0, Math.PI * 2);
-        ctx.fillStyle = blip.colour;
-        ctx.shadowColor = blip.colour;
+        ctx.fillStyle = blipColour;
+        ctx.shadowColor = blipColour;
         ctx.shadowBlur = blip.selected ? 16 : 9;
         ctx.fill();
         ctx.shadowBlur = 0;
@@ -238,11 +243,18 @@ export const SwarmAstrolabe: React.FC<{
       ctx.lineWidth = 1.5;
       ctx.stroke();
 
-      animationFrameId = requestAnimationFrame(render);
+      if (reducedMotion) {
+        reducedMotionTimer = window.setTimeout(render, 1000);
+      } else {
+        animationFrameId = requestAnimationFrame(render);
+      }
     };
 
     render();
-    return () => cancelAnimationFrame(animationFrameId);
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+      if (reducedMotionTimer !== undefined) window.clearTimeout(reducedMotionTimer);
+    };
   }, []);
   return (
     <div className="relative flex flex-col p-3 bg-obsidian-900 border border-cyber-cyan/30 rounded-lg overflow-hidden shadow-glow-cyan/20">
@@ -317,7 +329,7 @@ export const SwarmAstrolabe: React.FC<{
         ) : (
           <span className="text-slate-500">
             {plotted.length > 0
-              ? `${plotted.length} SWARM${plotted.length === 1 ? '' : 'S'} PLOTTED`
+              ? `${plotted.length} OF ${torrents.length} SWARMS PLOTTED${torrents.length > plotted.length ? ' · NEWEST FIRST' : ''}`
               : 'AWAITING SWARM INGESTION'}
           </span>
         )}

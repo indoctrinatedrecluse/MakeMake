@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { TorrentItem, TorrentFileItem, TorrentFilesPayload, PeerDetail, TorrentDiskUsage } from '../types/torrent';
 import { CyberProgressBar } from './gizmos/CyberProgressBar';
+import { formatBytes, formatSpeed } from '../utils/format';
 import { WorkBand, deriveHiddenWork } from './gizmos/WorkBand';
 import { SpeedOscilloscope } from './gizmos/SpeedOscilloscope';
 import { AhuBlockMatrix } from './gizmos/AhuBlockMatrix';
@@ -204,21 +205,6 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
     setTimeout(() => setCopiedHash(false), 2000);
   };
 
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
-  };
-
-  const formatSpeed = (bytesPerSec: number) => {
-    if (bytesPerSec === 0) return '0 B/s';
-    if (bytesPerSec < 1024) return `${bytesPerSec} B/s`;
-    if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
-    return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
-  };
-
   // Real announce URLs reported by the torrent metadata (empty = DHT-only swarm).
   const trackers = torrent.trackers ?? [];
 
@@ -386,6 +372,7 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
                     height={10}
                     glowColor={torrent.progress >= 100 ? 'green' : 'cyan'}
                     piecesBitfield={torrent.piecesBitfield}
+                    pieceMapExact={torrent.pieceMapExact}
                   />
                 </div>
 
@@ -748,6 +735,8 @@ export const TorrentDetailsDrawer: React.FC<TorrentDetailsDrawerProps> = ({
             <AhuBlockMatrix
               piecesBitfield={torrent.piecesBitfield}
               pieceCount={torrent.pieceCount}
+              piecesCompleted={torrent.piecesCompleted}
+              pieceMapExact={torrent.pieceMapExact}
               totalSize={torrent.totalBytes}
               torrentName={torrent.name}
             />

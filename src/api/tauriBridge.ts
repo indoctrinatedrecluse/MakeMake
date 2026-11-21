@@ -96,15 +96,8 @@ class DevStore {
   }
 
   public backupTorrentNow(id: string): { success: boolean; path: string } {
-    const target = this.torrents.find((t) => t.id === id);
-    if (!target) {
-      throw new Error(`Torrent ${id} not found`);
-    }
-    const path = `${this.settings.backupDir}/${target.name}.torrent`;
-    this.torrents = this.torrents.map((t) =>
-      t.id === id ? { ...t, backedUp: true, backupPath: path } : t,
-    );
-    return { success: true, path };
+    void id;
+    throw new Error('Torrent backups are available in the MakeMake desktop app only');
   }
 
   public deleteTorrent(id: string, _deleteFiles: boolean): void {
@@ -146,14 +139,9 @@ class DevStore {
   }
 
   public exportTorrent(id: string, path: string): { success: boolean; path: string } {
-    const target = this.torrents.find((t) => t.id === id);
-    if (!target) {
-      throw new Error(`Torrent ${id} not found`);
-    }
-    this.torrents = this.torrents.map((t) =>
-      t.id === id ? { ...t, backedUp: true, backupPath: path } : t,
-    );
-    return { success: true, path };
+    void id;
+    void path;
+    throw new Error('Torrent export is available in the MakeMake desktop app only');
   }
 
   public setTurtleMode(enabled: boolean): ClientSettings {
@@ -330,7 +318,7 @@ export const TauriBridge = {
       await invokeTauri<void>('retry_pending', { id });
       return;
     }
-    devStore.startTorrent(id);
+    throw new Error('Magnet metadata resolution is available in the MakeMake desktop app only');
   },
 
   /**
@@ -343,14 +331,8 @@ export const TauriBridge = {
     if (isTauriEnv()) {
       return invokeTauri<TorrentDiskUsage>('get_torrent_disk_usage', { id });
     }
-    // Browser dev has no filesystem to inspect: report the logical size only.
-    const torrent = devStore.getTorrents().find((t) => t.id === id);
-    if (!torrent) return { files: 0, logicalBytes: 0, allocatedBytes: 0 };
-    return {
-      files: torrent.files.length,
-      logicalBytes: torrent.totalBytes,
-      allocatedBytes: torrent.downloadedBytes,
-    };
+    void id;
+    throw new Error('Filesystem allocation data is available in the MakeMake desktop app only');
   },
 
   async getSettings(): Promise<ClientSettings> {
@@ -394,7 +376,8 @@ export const TauriBridge = {
       await invokeTauri<void>('refresh_swarm', { id });
       return;
     }
-    // The browser dev store has no trackers to ask.
+    void id;
+    throw new Error('Tracker scrapes are available in the MakeMake desktop app only');
   },
 
   async forceRecheck(id: string): Promise<void> {
@@ -402,7 +385,8 @@ export const TauriBridge = {
       await invokeTauri<void>('force_recheck', { id });
       return;
     }
-    devStore.forceRecheck(id);
+    void id;
+    throw new Error('Piece verification is available in the MakeMake desktop app only');
   },
 
   async backupTorrentNow(id: string): Promise<{ success: boolean; path: string }> {
@@ -417,7 +401,10 @@ export const TauriBridge = {
       await invokeTauri<void>('delete_torrent', { id, deleteFiles });
       return;
     }
-    devStore.deleteTorrent(id, deleteFiles);
+    if (deleteFiles) {
+      throw new Error('Deleting payload files is available in the MakeMake desktop app only');
+    }
+    devStore.deleteTorrent(id, false);
   },
 
   async pauseAll(): Promise<void> {
@@ -478,7 +465,7 @@ export const TauriBridge = {
       await invokeTauri<void>('open_path', { path });
       return;
     }
-    console.log(`[Open Path]: ${path}`);
+    throw new Error(`Opening paths is available in the MakeMake desktop app only: ${path}`);
   },
 
   async revealPath(path: string): Promise<void> {
@@ -486,7 +473,7 @@ export const TauriBridge = {
       await invokeTauri<void>('reveal_path', { path });
       return;
     }
-    console.log(`[Reveal Path]: ${path}`);
+    throw new Error(`Revealing paths is available in the MakeMake desktop app only: ${path}`);
   },
 
   async addTorrent(
@@ -535,7 +522,7 @@ export const TauriBridge = {
       await invokeTauri<void>('open_folder', { path });
       return;
     }
-    console.log(`[Open Folder]: ${path}`);
+    throw new Error(`Opening folders is available in the MakeMake desktop app only: ${path}`);
   },
 
   async getSystemStats(): Promise<SystemStats> {

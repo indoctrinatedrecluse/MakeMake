@@ -4,10 +4,8 @@ mod models;
 mod scrape;
 mod sparse;
 
-
 use std::sync::OnceLock;
 use std::time::Duration;
-
 
 use engine::TorrentEngine;
 use tauri::Manager;
@@ -121,6 +119,8 @@ pub fn run() {
         ])
         .setup(|app| {
             app.handle().plugin(tauri_plugin_dialog::init())?;
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Debug)

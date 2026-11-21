@@ -8,21 +8,15 @@ import { ContextMenu } from './components/ContextMenu';
 import { ConfirmModal } from './components/ConfirmModal';
 import { AddTorrentModal, AddConfirmOptions } from './components/AddTorrentModal';
 import { SettingsModal } from './components/SettingsModal';
+import { UpdateModal } from './components/UpdateModal';
 import { SplashScreen } from './components/SplashScreen';
 import { TauriBridge } from './api/tauriBridge';
 import { TorrentItem, ClientSettings, SystemStats, TorrentMetadataPreview, PurgeReport } from './types/torrent';
 import { cyberAudio } from './utils/cyberAudio';
 import { OperationMonitor, PendingOp } from './components/OperationMonitor';
 import { WorkKind } from './components/gizmos/WorkGlyph';
-
-/** Compact byte formatting for the toasts (each modal keeps its own local copy). */
-const formatBytes = (bytes: number) => {
-  if (!bytes || bytes <= 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
-};
+import { formatBytes } from './utils/format';
+import type { Update } from '@tauri-apps/plugin-updater';
 
 export const App: React.FC = () => {
   const [showSplash, setShowSplash] = useState(true);
@@ -78,6 +72,13 @@ export const App: React.FC = () => {
   } | null>(null);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState({ downloaded: 0, total: null as number | null });
+  const updateRef = useRef<Update | null>(null);
+  const updateCheckRef = useRef(false);
 
   // Tab the details drawer should show (context menu can jump straight to Files)
   const [drawerTab, setDrawerTab] = useState<DetailTab>('overview');
@@ -100,6 +101,61 @@ export const App: React.FC = () => {
       setToast((current) => (current && current.id === id ? null : current));
     }, TOAST_MS);
   }, []);
+
+  const checkForUpdates = useCallback(async (automatic = false) => {
+    if (!TauriBridge.isDesktop() || updateCheckRef.current) return;
+    if (updateRef.current) {
+      setIsUpdateModalOpen(true);
+      return;
+    }
+
+    updateCheckRef.current = true;
+    setIsCheckingUpdate(true);
+    if (!automatic) setIsUpdateModalOpen(true);
+    try {
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const result = await check();
+      if (result) {
+        updateRef.current = result;
+        setPendingUpdate(result);
+        setIsUpdateModalOpen(true);
+      } else if (!automatic) {
+        setIsUpdateModalOpen(false);
+        showToast('MakeMake is up to date');
+      }
+    } catch (error) {
+      console.warn('MakeMake update check failed', error);
+      if (!automatic) {
+        setIsUpdateModalOpen(false);
+        showToast(`Update check failed: ${error instanceof Error ? error.message : String(error)}`, 'danger');
+      }
+    } finally {
+      updateCheckRef.current = false;
+      setIsCheckingUpdate(false);
+    }
+  }, [showToast]);
+
+  const installUpdate = useCallback(async () => {
+    const update = updateRef.current;
+    if (!update || isInstallingUpdate) return;
+    setIsInstallingUpdate(true);
+    setUpdateProgress({ downloaded: 0, total: null });
+    try {
+      await update.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          setUpdateProgress((current) => ({ ...current, total: event.data.contentLength ?? null }));
+        } else if (event.event === 'Progress') {
+          setUpdateProgress((current) => ({ ...current, downloaded: current.downloaded + event.data.chunkLength }));
+        } else if (event.event === 'Finished') {
+          setUpdateProgress((current) => ({ ...current, total: current.total ?? current.downloaded }));
+        }
+      }, { restartAfterInstall: true });
+    } catch (error) {
+      console.error('MakeMake update installation failed', error);
+      setIsInstallingUpdate(false);
+      showToast(`Update installation failed: ${error instanceof Error ? error.message : String(error)}`, 'danger');
+    }
+  }, [isInstallingUpdate, showToast]);
 
   // Commands that are already on their way to the engine. Every handler funnels through
   // `runOp`, so a slow add/verify/purge shows a live "transmitting" readout instead of silence.
@@ -291,6 +347,13 @@ export const App: React.FC = () => {
       if (timer) window.clearTimeout(timer);
     };
   }, [refreshData]);
+
+  // Check once after startup settles; installation always waits for an explicit choice.
+  useEffect(() => {
+    if (!TauriBridge.isDesktop()) return;
+    const timer = window.setTimeout(() => void checkForUpdates(true), 12_000);
+    return () => window.clearTimeout(timer);
+  }, [checkForUpdates]);
 
   // Handle Drag and Drop for .torrent files
   useEffect(() => {
@@ -683,11 +746,19 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleToggleSound = () => {
+  const handleToggleSound = async () => {
     const next = !soundEnabled;
     setSoundEnabled(next);
     cyberAudio.enabled = next;
     if (next) cyberAudio.playClick();
+    try {
+      const updated = await TauriBridge.updateSettings({ ...settings, enableSoundFx: next });
+      setSettings(updated);
+    } catch (err) {
+      setSoundEnabled(!next);
+      cyberAudio.enabled = !next;
+      showToast(err instanceof Error ? err.message : String(err), 'danger');
+    }
   };
 
   const counts = useMemo(
@@ -704,7 +775,7 @@ export const App: React.FC = () => {
   );
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-obsidian-950 font-mono text-slate-100 select-none">
+    <div data-theme={settings.theme} className="flex flex-col h-screen w-screen overflow-hidden bg-obsidian-950 font-mono text-slate-100 select-none">
       {/* Animated Splash Screen */}
       {showSplash && (
         <SplashScreen
@@ -745,6 +816,10 @@ export const App: React.FC = () => {
           setIsSettingsOpen(true);
         }}
         onShowSplash={() => setShowSplash(true)}
+        onCheckUpdates={() => void checkForUpdates(false)}
+        updateAvailable={pendingUpdate !== null}
+        isCheckingUpdate={isCheckingUpdate}
+        updaterEnabled={TauriBridge.isDesktop()}
         onPauseAll={handlePauseAll}
         onResumeAll={handleResumeAll}
         torrentCount={torrents.length}
@@ -765,7 +840,7 @@ export const App: React.FC = () => {
           stats={stats}
         />
 
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
           {/* Torrent List Area */}
           <TorrentList
             torrents={torrents}
@@ -888,6 +963,16 @@ export const App: React.FC = () => {
         settings={settings}
         onClose={() => setIsSettingsOpen(false)}
         onSave={handleSaveSettings}
+      />
+
+      <UpdateModal
+        update={isUpdateModalOpen ? pendingUpdate : null}
+        isChecking={isUpdateModalOpen && isCheckingUpdate}
+        isInstalling={isInstallingUpdate}
+        downloadedBytes={updateProgress.downloaded}
+        contentLength={updateProgress.total}
+        onClose={() => setIsUpdateModalOpen(false)}
+        onInstall={() => void installUpdate()}
       />
 
       {/* Commands in flight: a live readout so a slow engine call never reads as a freeze */}

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Activity } from 'lucide-react';
+import { formatSpeed } from '../../utils/format';
 
 interface SpeedSample {
   time: number;
@@ -20,21 +21,26 @@ export const SpeedOscilloscope: React.FC<SpeedOscilloscopeProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const historyRef = useRef<SpeedSample[]>([]);
+  const speedsRef = useRef({ download: currentDownloadSpeed, upload: currentUploadSpeed });
   const [hoveredPoint, setHoveredPoint] = useState<{ dl: number; ul: number; timeSecAgo: number } | null>(null);
 
-  // Maintain circular time-series buffer
   useEffect(() => {
-    const now = Date.now();
-    historyRef.current.push({
-      time: now,
-      download: currentDownloadSpeed,
-      upload: currentUploadSpeed,
-    });
+    speedsRef.current = { download: currentDownloadSpeed, upload: currentUploadSpeed };
+  }, [currentDownloadSpeed, currentUploadSpeed]);
 
-    if (historyRef.current.length > maxHistorySeconds) {
-      historyRef.current.shift();
-    }
-  }, [currentDownloadSpeed, currentUploadSpeed, maxHistorySeconds]);
+  // Sample on the clock, including zero-speed periods, so the plotted x-axis represents time.
+  useEffect(() => {
+    const sample = () => {
+      const now = Date.now();
+      const speeds = speedsRef.current;
+      historyRef.current.push({ time: now, ...speeds });
+      const cutoff = now - maxHistorySeconds * 1000;
+      historyRef.current = historyRef.current.filter((point) => point.time >= cutoff);
+    };
+    sample();
+    const timer = window.setInterval(sample, 1000);
+    return () => window.clearInterval(timer);
+  }, [maxHistorySeconds]);
 
   // Render loop for high-tech telemetry oscilloscope
   useEffect(() => {
@@ -43,19 +49,23 @@ export const SpeedOscilloscope: React.FC<SpeedOscilloscopeProps> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let animId: number;
+    let drawTimer: number | undefined;
 
     const render = () => {
       const width = canvas.width;
       const height = canvas.height;
+      const palette = getComputedStyle(canvas);
+      const cyan = palette.getPropertyValue('--cyber-cyan').trim() || '0 240 255';
+      const red = palette.getPropertyValue('--cyber-red').trim() || '255 42 109';
+      const surface = palette.getPropertyValue('--obsidian-950').trim() || '5 7 10';
       ctx.clearRect(0, 0, width, height);
 
       // Background grid & cyber scanlines
-      ctx.fillStyle = '#060a10';
+      ctx.fillStyle = `rgb(${surface})`;
       ctx.fillRect(0, 0, width, height);
 
       // Grid lines
-      ctx.strokeStyle = 'rgba(30, 41, 59, 0.4)';
+      ctx.strokeStyle = `rgb(${palette.getPropertyValue('--obsidian-600').trim() || '40 53 76'} / 0.4)`;
       ctx.lineWidth = 1;
       const horizontalDivs = 4;
       for (let i = 1; i < horizontalDivs; i++) {
@@ -77,7 +87,6 @@ export const SpeedOscilloscope: React.FC<SpeedOscilloscopeProps> = ({
 
       const history = historyRef.current;
       if (history.length < 2) {
-        animId = requestAnimationFrame(render);
         return;
       }
 
@@ -88,29 +97,32 @@ export const SpeedOscilloscope: React.FC<SpeedOscilloscopeProps> = ({
       );
       const topScale = maxSampleSpeed * 1.15;
 
-      const getX = (idx: number) => (idx / (maxHistorySeconds - 1)) * width;
+      const windowEnd = history[history.length - 1].time;
+      const windowStart = windowEnd - maxHistorySeconds * 1000;
+      const getX = (sample: SpeedSample) =>
+        Math.max(0, Math.min(width, ((sample.time - windowStart) / (maxHistorySeconds * 1000)) * width));
       const getY = (val: number) => height - (val / topScale) * (height - 20) - 10;
 
       // Draw Download Waveform (Cyan)
       // Gradient Fill
       const dlGrad = ctx.createLinearGradient(0, 0, 0, height);
-      dlGrad.addColorStop(0, 'rgba(0, 240, 255, 0.35)');
-      dlGrad.addColorStop(1, 'rgba(0, 240, 255, 0.0)');
+      dlGrad.addColorStop(0, `rgb(${cyan} / 0.35)`);
+      dlGrad.addColorStop(1, `rgb(${cyan} / 0)`);
 
       ctx.beginPath();
       ctx.moveTo(0, height);
       history.forEach((sample, i) => {
-        const x = getX(i);
+        const x = getX(sample);
         const y = getY(sample.download);
         if (i === 0) ctx.lineTo(x, y);
         else {
-          const prevX = getX(i - 1);
+          const prevX = getX(history[i - 1]);
           const prevY = getY(history[i - 1].download);
           const cpX = (prevX + x) / 2;
           ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
         }
       });
-      ctx.lineTo(getX(history.length - 1), height);
+      ctx.lineTo(getX(history[history.length - 1]), height);
       ctx.closePath();
       ctx.fillStyle = dlGrad;
       ctx.fill();
@@ -118,42 +130,42 @@ export const SpeedOscilloscope: React.FC<SpeedOscilloscopeProps> = ({
       // Stroke line
       ctx.beginPath();
       history.forEach((sample, i) => {
-        const x = getX(i);
+        const x = getX(sample);
         const y = getY(sample.download);
         if (i === 0) ctx.moveTo(x, y);
         else {
-          const prevX = getX(i - 1);
+          const prevX = getX(history[i - 1]);
           const prevY = getY(history[i - 1].download);
           const cpX = (prevX + x) / 2;
           ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
         }
       });
-      ctx.strokeStyle = '#00f0ff';
+      ctx.strokeStyle = `rgb(${cyan})`;
       ctx.lineWidth = 2;
-      ctx.shadowColor = '#00f0ff';
+      ctx.shadowColor = `rgb(${cyan})`;
       ctx.shadowBlur = 10;
       ctx.stroke();
       ctx.shadowBlur = 0;
 
       // Draw Upload Waveform (Vermilion Red)
       const ulGrad = ctx.createLinearGradient(0, 0, 0, height);
-      ulGrad.addColorStop(0, 'rgba(255, 42, 109, 0.25)');
-      ulGrad.addColorStop(1, 'rgba(255, 42, 109, 0.0)');
+      ulGrad.addColorStop(0, `rgb(${red} / 0.25)`);
+      ulGrad.addColorStop(1, `rgb(${red} / 0)`);
 
       ctx.beginPath();
       ctx.moveTo(0, height);
       history.forEach((sample, i) => {
-        const x = getX(i);
+        const x = getX(sample);
         const y = getY(sample.upload);
         if (i === 0) ctx.lineTo(x, y);
         else {
-          const prevX = getX(i - 1);
+          const prevX = getX(history[i - 1]);
           const prevY = getY(history[i - 1].upload);
           const cpX = (prevX + x) / 2;
           ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
         }
       });
-      ctx.lineTo(getX(history.length - 1), height);
+      ctx.lineTo(getX(history[history.length - 1]), height);
       ctx.closePath();
       ctx.fillStyle = ulGrad;
       ctx.fill();
@@ -161,31 +173,31 @@ export const SpeedOscilloscope: React.FC<SpeedOscilloscopeProps> = ({
       // Stroke line
       ctx.beginPath();
       history.forEach((sample, i) => {
-        const x = getX(i);
+        const x = getX(sample);
         const y = getY(sample.upload);
         if (i === 0) ctx.moveTo(x, y);
         else {
-          const prevX = getX(i - 1);
+          const prevX = getX(history[i - 1]);
           const prevY = getY(history[i - 1].upload);
           const cpX = (prevX + x) / 2;
           ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
         }
       });
-      ctx.strokeStyle = '#ff2a6d';
+      ctx.strokeStyle = `rgb(${red})`;
       ctx.lineWidth = 1.8;
-      ctx.shadowColor = '#ff2a6d';
+      ctx.shadowColor = `rgb(${red})`;
       ctx.shadowBlur = 8;
       ctx.stroke();
       ctx.shadowBlur = 0;
 
       // Latest Tip Indicator Points
       const lastIdx = history.length - 1;
-      const lastDlX = getX(lastIdx);
+      const lastDlX = getX(history[lastIdx]);
       const lastDlY = getY(history[lastIdx].download);
       ctx.beginPath();
       ctx.arc(lastDlX, lastDlY, 3.5, 0, Math.PI * 2);
       ctx.fillStyle = '#ffffff';
-      ctx.shadowColor = '#00f0ff';
+      ctx.shadowColor = `rgb(${cyan})`;
       ctx.shadowBlur = 8;
       ctx.fill();
 
@@ -193,23 +205,19 @@ export const SpeedOscilloscope: React.FC<SpeedOscilloscopeProps> = ({
       ctx.beginPath();
       ctx.arc(lastDlX, lastUlY, 3, 0, Math.PI * 2);
       ctx.fillStyle = '#ffffff';
-      ctx.shadowColor = '#ff2a6d';
+      ctx.shadowColor = `rgb(${red})`;
       ctx.shadowBlur = 8;
       ctx.fill();
       ctx.shadowBlur = 0;
 
-      animId = requestAnimationFrame(render);
     };
 
     render();
-    return () => cancelAnimationFrame(animId);
+    drawTimer = window.setInterval(render, 1000);
+    return () => {
+      if (drawTimer !== undefined) window.clearInterval(drawTimer);
+    };
   }, [maxHistorySeconds]);
-
-  const formatSpeed = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B/s`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB/s`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB/s`;
-  };
 
   return (
     <div className="relative flex flex-col p-3 rounded-lg bg-obsidian-950/90 border border-slate-800 shadow-obsidian-inner overflow-hidden font-mono">
@@ -243,12 +251,12 @@ export const SpeedOscilloscope: React.FC<SpeedOscilloscopeProps> = ({
             const rect = e.currentTarget.getBoundingClientRect();
             const relX = (e.clientX - rect.left) / rect.width;
             const history = historyRef.current;
-            const targetIdx = Math.floor(relX * (history.length - 1));
+            const targetIdx = Math.max(0, Math.min(history.length - 1, Math.floor(relX * (history.length - 1))));
             if (history[targetIdx]) {
               setHoveredPoint({
                 dl: history[targetIdx].download,
                 ul: history[targetIdx].upload,
-                timeSecAgo: history.length - targetIdx,
+                timeSecAgo: Math.max(0, Math.round((Date.now() - history[targetIdx].time) / 1000)),
               });
             }
           }}
